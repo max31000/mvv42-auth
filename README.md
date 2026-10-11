@@ -60,7 +60,7 @@ IP клиента и обошёл rate limit). Проверить gateway:
 ## Локально
 
 ```bash
-dotnet test                                   # 150+ тестов, MySQL не нужен
+dotnet test                                   # 130+ тестов, MySQL не нужен
 cd sdk/web && npm ci && npm test              # web SDK (vitest)
 dotnet run --project src/Mvv42.Auth           # http://localhost:5010/auth/health
 ```
