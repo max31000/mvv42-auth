@@ -54,6 +54,8 @@ public abstract class AuthStoreContractTests
     {
         var user = await NewUser();
         Assert.True(await Store.SetUserAdminAsync(user.Id, true));
+        // unchanged value: still "found" whatever the connection's affected-rows mode is
+        Assert.True(await Store.SetUserAdminAsync(user.Id, true));
         Assert.True((await Store.GetUserAsync(user.Id))!.IsAdmin);
         Assert.Contains(await Store.ListUsersAsync(), u => u.Id == user.Id && u.IsAdmin);
         Assert.False(await Store.SetUserAdminAsync(-1, true));
@@ -135,6 +137,34 @@ public abstract class AuthStoreContractTests
         Assert.Equal(T0.AddMinutes(10), byCurrent.LastUsedAt);
         Assert.Equal(T0.AddDays(31), byCurrent.ExpiresAt);
         Assert.Null(await Store.GetSessionByRefreshHashAsync(Hash()));
+    }
+
+    [Fact]
+    public async Task Rotation_RecordsReplacedHashInHistory_UntilTheSessionIsDeleted()
+    {
+        var s = await NewSession();
+        var (h1, h2, unknown) = (Hash(), Hash(), Hash());
+        Assert.Null(await Store.GetRefreshHistoryAsync(s.RefreshHash));
+
+        Assert.True(await Store.UpdateSessionRotationAsync(s.Id, s.RefreshHash, h1, T0.AddMinutes(1), T0.AddDays(30)));
+        Assert.True(await Store.UpdateSessionRotationAsync(s.Id, h1, h2, T0.AddMinutes(2), T0.AddDays(30)));
+        // a failed (conditional) rotation records nothing
+        Assert.False(await Store.UpdateSessionRotationAsync(s.Id, unknown, Hash(), T0.AddMinutes(3), T0.AddDays(30)));
+
+        var h0Entry = await Store.GetRefreshHistoryAsync(s.RefreshHash);
+        Assert.NotNull(h0Entry);
+        Assert.Equal(s.FamilyId, h0Entry.FamilyId);
+        Assert.Equal(s.Id, h0Entry.SessionId);
+        Assert.Equal(T0.AddMinutes(1), h0Entry.RotatedAt);
+        Assert.Equal(T0.AddMinutes(2), (await Store.GetRefreshHistoryAsync(h1))!.RotatedAt);
+        Assert.Null(await Store.GetRefreshHistoryAsync(h2)); // current token
+        Assert.Null(await Store.GetRefreshHistoryAsync(unknown));
+
+        // revoked family → removed by the cleanup together with its history
+        await Store.RevokeFamilyAsync(s.FamilyId, T0.AddMinutes(5));
+        await Store.DeleteStaleSessionsAsync(now: T0.AddMinutes(10), revokedBefore: T0.AddMinutes(6));
+        Assert.Null(await Store.GetRefreshHistoryAsync(s.RefreshHash));
+        Assert.Null(await Store.GetRefreshHistoryAsync(h1));
     }
 
     [Fact]

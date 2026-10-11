@@ -1,7 +1,9 @@
 -- mvv42-auth initial schema. All DATETIME values are UTC.
 -- MigrationRunner splits on semicolons and strips line comments, so keep both out of string literals.
+-- Idempotent (IF NOT EXISTS / INSERT IGNORE): MySQL commits DDL implicitly, so a run that fails halfway
+-- must be safely re-runnable.
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id             BIGINT        NOT NULL AUTO_INCREMENT,
     telegram_id    BIGINT        NOT NULL,
     username       VARCHAR(64)   NULL,
@@ -15,7 +17,7 @@ CREATE TABLE users (
     UNIQUE KEY uq_users_telegram_id (telegram_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE apps (
+CREATE TABLE IF NOT EXISTS apps (
     id         VARCHAR(64)                      NOT NULL,
     name       VARCHAR(255)                     NOT NULL,
     anonymous  TINYINT(1)                       NOT NULL DEFAULT 0,
@@ -23,7 +25,7 @@ CREATE TABLE apps (
     PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE app_grants (
+CREATE TABLE IF NOT EXISTS app_grants (
     user_id     BIGINT       NOT NULL,
     app_id      VARCHAR(64)  NOT NULL,
     created_at  DATETIME(6)  NOT NULL,
@@ -33,7 +35,7 @@ CREATE TABLE app_grants (
     CONSTRAINT fk_app_grants_app FOREIGN KEY (app_id) REFERENCES apps (id) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE invites (
+CREATE TABLE IF NOT EXISTS invites (
     id          BIGINT       NOT NULL AUTO_INCREMENT,
     code_hash   CHAR(64)     NOT NULL,
     app_id      VARCHAR(64)  NOT NULL,
@@ -49,7 +51,7 @@ CREATE TABLE invites (
     CONSTRAINT fk_invites_created_by FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id                 BIGINT        NOT NULL AUTO_INCREMENT,
     user_id            BIGINT        NOT NULL,
     family_id          CHAR(36)      NOT NULL,
@@ -70,7 +72,7 @@ CREATE TABLE sessions (
     CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT INTO apps (id, name, anonymous, access) VALUES
+INSERT IGNORE INTO apps (id, name, anonymous, access) VALUES
     ('cashpulse', 'CashPulse', 0, 'public'),
     ('credit_calc', 'Кредитный калькулятор', 1, 'public'),
     ('bonds', 'Облигации', 0, 'admin');

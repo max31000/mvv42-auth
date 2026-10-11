@@ -65,3 +65,16 @@ public class MySqlAuthStoreTests : IClassFixture<MySqlStoreFixture>
         }
     }
 }
+
+public class MySqlConnectionStringTests
+{
+    [Theory]
+    [InlineData("Server=db;Database=mvv42_auth;User ID=u;Password=p")]
+    [InlineData("Server=db;Database=mvv42_auth;User ID=u;Password=p;GuidFormat=Char36;UseAffectedRows=true")]
+    public void Normalize_ReadsChar36AsString(string configured)
+    {
+        var normalized = new MySqlConnector.MySqlConnectionStringBuilder(MySqlAuthStore.Normalize(configured));
+        Assert.Equal(MySqlConnector.MySqlGuidFormat.None, normalized.GuidFormat);
+        Assert.Equal("mvv42_auth", normalized.Database);
+    }
+}

@@ -18,6 +18,7 @@ public sealed class InMemoryAuthStore : IAuthStore
     ];
     private readonly List<Grant> _grants = [];
     private readonly List<Session> _sessions = [];
+    private readonly List<RefreshHistoryEntry> _history = [];
     private readonly List<Invite> _invites = [];
     private long _nextId = 1;
 
@@ -42,6 +43,16 @@ public sealed class InMemoryAuthStore : IAuthStore
         };
         if (index >= 0) _users[index] = user; else _users.Add(user);
         return user;
+    });
+
+    /// <summary>Tests only: deletes a user with their grants, sessions and history (FK cascades in MySQL).</summary>
+    internal void DeleteUser(long id) => Locked(() =>
+    {
+        var sessions = _sessions.Where(s => s.UserId == id).Select(s => s.Id).ToHashSet();
+        _history.RemoveAll(h => sessions.Contains(h.SessionId));
+        _sessions.RemoveAll(s => s.UserId == id);
+        _grants.RemoveAll(g => g.UserId == id);
+        return _users.RemoveAll(u => u.Id == id);
     });
 
     public Task<User?> GetUserAsync(long id) => Run(() => _users.FirstOrDefault(u => u.Id == id));
@@ -104,6 +115,13 @@ public sealed class InMemoryAuthStore : IAuthStore
     {
         var index = _sessions.FindIndex(s => s.Id == id && s.RefreshHash == expectedHash);
         if (index < 0) return false;
+        _history.Add(new RefreshHistoryEntry
+        {
+            Hash = expectedHash,
+            FamilyId = _sessions[index].FamilyId,
+            SessionId = id,
+            RotatedAt = rotatedAt,
+        });
         _sessions[index] = _sessions[index] with
         {
             PrevRefreshHash = expectedHash,
@@ -114,6 +132,9 @@ public sealed class InMemoryAuthStore : IAuthStore
         };
         return true;
     });
+
+    public Task<RefreshHistoryEntry?> GetRefreshHistoryAsync(string refreshHash) =>
+        Run(() => _history.FirstOrDefault(h => h.Hash == refreshHash));
 
     public Task RevokeFamilyAsync(string familyId, DateTime now) => Run(() => Revoke(s => s.FamilyId == familyId, now));
 
@@ -127,8 +148,12 @@ public sealed class InMemoryAuthStore : IAuthStore
         return true;
     }
 
-    public Task<int> DeleteStaleSessionsAsync(DateTime now, DateTime revokedBefore) =>
-        Run(() => _sessions.RemoveAll(s => s.ExpiresAt < now || s.RevokedAt < revokedBefore));
+    public Task<int> DeleteStaleSessionsAsync(DateTime now, DateTime revokedBefore) => Run(() =>
+    {
+        var stale = _sessions.Where(s => s.ExpiresAt < now || s.RevokedAt < revokedBefore).Select(s => s.Id).ToHashSet();
+        _history.RemoveAll(h => stale.Contains(h.SessionId)); // ON DELETE CASCADE in MySQL
+        return _sessions.RemoveAll(s => stale.Contains(s.Id));
+    });
 
     public Task<long> CreateInviteAsync(Invite invite) => Run(() =>
     {

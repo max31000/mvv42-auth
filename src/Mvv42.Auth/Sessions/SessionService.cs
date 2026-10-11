@@ -15,7 +15,10 @@ public enum RefreshStatus
     /// <summary>Unknown, expired or revoked.</summary>
     Invalid,
 
-    /// <summary>Previous token presented after the grace window: the whole family has been revoked.</summary>
+    /// <summary>
+    /// Previous token presented after the grace window, or any older rotated-away token (refresh-token history):
+    /// the whole family has been revoked.
+    /// </summary>
     Reused,
 }
 
@@ -58,7 +61,18 @@ public sealed class SessionService(IAuthStore store, IOptions<AuthOptions> optio
         var now = time.GetUtcNow().UtcDateTime;
         var hash = Hash(refreshToken);
         var session = await store.GetSessionByRefreshHashAsync(hash);
-        if (session is null || session.RevokedAt is not null || now >= session.ExpiresAt
+        if (session is null)
+        {
+            // Rotated away two or more generations ago: only the history knows it → reuse of a stolen/stale token.
+            if (await store.GetRefreshHistoryAsync(hash) is { } old)
+            {
+                await store.RevokeFamilyAsync(old.FamilyId, now);
+                return new(RefreshStatus.Reused);
+            }
+            return new(RefreshStatus.Invalid);
+        }
+
+        if (session.RevokedAt is not null || now >= session.ExpiresAt
             || now >= session.CreatedAt + O.SessionFamilyLifetime)
             return new(RefreshStatus.Invalid);
 

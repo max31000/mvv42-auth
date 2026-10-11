@@ -79,6 +79,32 @@ public class SessionServiceTests
         Assert.Equal(RefreshStatus.Invalid, (await _sessions.RefreshAsync(rotated.NewRefreshToken!)).Status);
     }
 
+    [Fact]
+    public async Task Refresh_WithTokenOlderThanPrevious_IsReuse_AndRevokesFamily()
+    {
+        var (_, t0) = await _sessions.CreateAsync(_userId, null);
+        _time.Advance(TimeSpan.FromMinutes(10));
+        var t1 = (await _sessions.RefreshAsync(t0)).NewRefreshToken!;
+        _time.Advance(TimeSpan.FromMinutes(10));
+        var t2 = (await _sessions.RefreshAsync(t1)).NewRefreshToken!;
+
+        // t0 is neither current nor previous any more: only the history knows it
+        Assert.Equal(RefreshStatus.Reused, (await _sessions.RefreshAsync(t0)).Status);
+        Assert.Equal(RefreshStatus.Invalid, (await _sessions.RefreshAsync(t2)).Status);
+    }
+
+    [Fact]
+    public async Task Refresh_WithAncientToken_IsReuse_EvenRightAfterRotation()
+    {
+        var (_, t0) = await _sessions.CreateAsync(_userId, null);
+        var t1 = (await _sessions.RefreshAsync(t0)).NewRefreshToken!;
+        var t2 = (await _sessions.RefreshAsync(t1)).NewRefreshToken!;
+
+        // grace covers only the immediately previous token
+        Assert.Equal(RefreshStatus.Reused, (await _sessions.RefreshAsync(t0)).Status);
+        Assert.Equal(RefreshStatus.Invalid, (await _sessions.RefreshAsync(t2)).Status);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

@@ -7,6 +7,8 @@ namespace Mvv42.Auth.Data;
 /// <summary>Dapper + MySqlConnector implementation. One short-lived connection per call (pooled).</summary>
 public sealed class MySqlAuthStore(string connectionString) : IAuthStore
 {
+    private readonly string _connectionString = Normalize(connectionString);
+
     private const string UserColumns =
         "id, telegram_id, username, first_name, last_name, photo_url, is_admin, created_at, last_login_at";
     private const string SessionColumns =
@@ -18,10 +20,18 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
 
     private async Task<MySqlConnection> OpenAsync()
     {
-        var conn = new MySqlConnection(connectionString);
+        var conn = new MySqlConnection(_connectionString);
         await conn.OpenAsync();
         return conn;
     }
+
+    /// <summary>
+    /// Pins the connection semantics the store relies on, whatever the configured string says:
+    /// <c>GuidFormat=None</c> — <c>family_id CHAR(36)</c> is read as a string (MySqlConnector's default would turn
+    /// every CHAR(36) into a <see cref="Guid"/>). Results do not depend on <c>UseAffectedRows</c>.
+    /// </summary>
+    internal static string Normalize(string connectionString) =>
+        new MySqlConnectionStringBuilder(connectionString) { GuidFormat = MySqlGuidFormat.None }.ConnectionString;
 
     // ---- users
 
@@ -54,8 +64,11 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
     public async Task<bool> SetUserAdminAsync(long id, bool isAdmin)
     {
         await using var conn = await OpenAsync();
-        // FOUND_ROWS semantics: MySqlConnector defaults UseAffectedRows=false, so an unchanged row still counts.
-        return await conn.ExecuteAsync("UPDATE users SET is_admin = @isAdmin WHERE id = @id", new { id, isAdmin }) > 0;
+        // Independent of the connection's UseAffectedRows mode: with UseAffectedRows=true an UPDATE that does not
+        // change the value reports 0 rows, so "not found" is decided by an existence check instead.
+        if (await conn.ExecuteAsync("UPDATE users SET is_admin = @isAdmin WHERE id = @id", new { id, isAdmin }) > 0)
+            return true;
+        return await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM users WHERE id = @id", new { id }) > 0;
     }
 
     // ---- apps
@@ -143,12 +156,34 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
     public async Task<bool> UpdateSessionRotationAsync(long id, string expectedHash, string newHash, DateTime rotatedAt, DateTime expiresAt)
     {
         await using var conn = await OpenAsync();
-        return await conn.ExecuteAsync("""
+        await using var tx = await conn.BeginTransactionAsync();
+        // The new hash always differs, so the row counts as changed under either affected-rows mode.
+        var rotated = await conn.ExecuteAsync("""
             UPDATE sessions
             SET prev_refresh_hash = refresh_hash, refresh_hash = @newHash,
                 rotated_at = @rotatedAt, last_used_at = @rotatedAt, expires_at = @expiresAt
             WHERE id = @id AND refresh_hash = @expectedHash
-            """, new { id, expectedHash, newHash, rotatedAt, expiresAt }) == 1;
+            """, new { id, expectedHash, newHash, rotatedAt, expiresAt }, tx) == 1;
+        if (!rotated)
+        {
+            await tx.RollbackAsync();
+            return false;
+        }
+
+        await conn.ExecuteAsync("""
+            INSERT INTO refresh_token_history (hash, family_id, session_id, rotated_at)
+            SELECT @expectedHash, family_id, id, @rotatedAt FROM sessions WHERE id = @id
+            """, new { id, expectedHash, rotatedAt }, tx);
+        await tx.CommitAsync();
+        return true;
+    }
+
+    public async Task<RefreshHistoryEntry?> GetRefreshHistoryAsync(string refreshHash)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.QuerySingleOrDefaultAsync<RefreshHistoryEntry>(
+            "SELECT hash, family_id, session_id, rotated_at FROM refresh_token_history WHERE hash = @refreshHash",
+            new { refreshHash });
     }
 
     public async Task RevokeFamilyAsync(string familyId, DateTime now)
@@ -168,6 +203,7 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
     public async Task<int> DeleteStaleSessionsAsync(DateTime now, DateTime revokedBefore)
     {
         await using var conn = await OpenAsync();
+        // refresh_token_history rows go away via ON DELETE CASCADE.
         return await conn.ExecuteAsync(
             "DELETE FROM sessions WHERE expires_at < @now OR revoked_at < @revokedBefore", new { now, revokedBefore });
     }

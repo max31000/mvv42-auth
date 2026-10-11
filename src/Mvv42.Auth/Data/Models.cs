@@ -78,3 +78,16 @@ public sealed record Invite
     public long? CreatedBy { get; init; }
     public DateTime CreatedAt { get; init; }
 }
+
+/// <summary>
+/// A refresh hash that has been rotated away (written in the same transaction as the rotation). Presenting it
+/// later — older than the 30 s grace of <see cref="Session.PrevRefreshHash"/> — is reuse → the family is revoked.
+/// Rows go away with their session (cleanup of expired/revoked sessions).
+/// </summary>
+public sealed record RefreshHistoryEntry
+{
+    public string Hash { get; init; } = "";
+    public string FamilyId { get; init; } = "";
+    public long SessionId { get; init; }
+    public DateTime RotatedAt { get; init; }
+}

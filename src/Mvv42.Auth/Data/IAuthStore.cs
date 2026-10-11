@@ -30,12 +30,18 @@ public interface IAuthStore
     Task<Session?> GetSessionByRefreshHashAsync(string refreshHash);
     /// <summary>
     /// Rotates only if the current hash is still <paramref name="expectedHash"/> (optimistic concurrency):
-    /// prev = expected, current = new, rotated_at = last_used_at = <paramref name="rotatedAt"/>.
+    /// prev = expected, current = new, rotated_at = last_used_at = <paramref name="rotatedAt"/>; in the same
+    /// transaction <paramref name="expectedHash"/> is recorded in the refresh-token history.
     /// </summary>
     Task<bool> UpdateSessionRotationAsync(long id, string expectedHash, string newHash, DateTime rotatedAt, DateTime expiresAt);
+    /// <summary>A hash that was rotated away (any generation), or null.</summary>
+    Task<RefreshHistoryEntry?> GetRefreshHistoryAsync(string refreshHash);
     Task RevokeFamilyAsync(string familyId, DateTime now);
     Task RevokeSessionAsync(long id, DateTime now);
-    /// <summary>Deletes sessions expired before <paramref name="now"/> or revoked before <paramref name="revokedBefore"/>.</summary>
+    /// <summary>
+    /// Deletes sessions expired before <paramref name="now"/> or revoked before <paramref name="revokedBefore"/>,
+    /// together with their refresh-token history.
+    /// </summary>
     Task<int> DeleteStaleSessionsAsync(DateTime now, DateTime revokedBefore);
 
     // Invites
