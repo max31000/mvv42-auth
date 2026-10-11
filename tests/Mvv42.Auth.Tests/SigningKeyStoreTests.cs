@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Microsoft.IdentityModel.Tokens;
 using Mvv42.Auth.Keys;
 
@@ -83,5 +84,65 @@ public class SigningKeyStoreTests : IDisposable
         Assert.Equal(key.Kid, jwk.Kid);
         Assert.False(string.IsNullOrEmpty(jwk.X));
         Assert.False(string.IsNullOrEmpty(jwk.Y));
+    }
+
+    private void WriteKeyFile(string name, string content) => File.WriteAllText(Path.Combine(_dir.Path, name), content);
+
+    [Fact]
+    public void Generate_WritesAtomically_LeavingNoTempFile()
+    {
+        NewStore().GetSigningKey();
+        Assert.Equal(["es256-20261011120000.pem"], Directory.GetFiles(_dir.Path).Select(Path.GetFileName));
+    }
+
+    [Fact]
+    public void LeftoverTempFile_IsIgnored()
+    {
+        var valid = NewStore().GetSigningKey();
+        WriteKeyFile("es256-20261011130000.pem.tmp", "-----BEGIN PRIVATE KEY-----\ntruncated");
+
+        _time.Advance(TimeSpan.FromMinutes(2));
+        Assert.Equal(valid.Kid, Assert.Single(NewStore().GetKeys()).Kid);
+    }
+
+    [Fact]
+    public void CorruptFile_IsSkipped_OtherKeysStillLoad()
+    {
+        var valid = NewStore().GetSigningKey();
+        WriteKeyFile("es256-20261011110000.pem", "not a pem at all");
+
+        var keys = NewStore().GetKeys();
+
+        Assert.Equal(valid.Kid, Assert.Single(keys).Kid);
+    }
+
+    [Fact]
+    public void OnlyCorruptFiles_AFreshKeyIsGenerated()
+    {
+        WriteKeyFile("es256-20261011110000.pem", "garbage");
+
+        var key = NewStore().GetSigningKey();
+
+        Assert.Equal("es256-20261011120000.pem", key.FileName);
+    }
+
+    [Fact]
+    public void NonP256Key_IsRejected()
+    {
+        using var p384 = ECDsa.Create(ECCurve.NamedCurves.nistP384);
+        WriteKeyFile("es256-20261011110000.pem", p384.ExportPkcs8PrivateKeyPem());
+        var valid = NewStore().CreateKey();
+
+        Assert.Equal(valid.Kid, Assert.Single(NewStore().GetKeys()).Kid);
+    }
+
+    [Fact]
+    public void PublicOnlyKey_IsRejected()
+    {
+        using var publicOnly = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        WriteKeyFile("es256-20261011110000.pem", publicOnly.ExportSubjectPublicKeyInfoPem());
+        var valid = NewStore().CreateKey();
+
+        Assert.Equal(valid.Kid, Assert.Single(NewStore().GetKeys()).Kid);
     }
 }

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.IdentityModel.Tokens;
 
 namespace Mvv42.Auth.Keys;
@@ -27,9 +28,12 @@ public sealed record JwksDocument([property: JsonPropertyName("keys")] IReadOnly
 /// All keys are published in JWKS. The signing key is the newest one that is older than the activation
 /// delay (so caches of every consumer already know it); a lone key signs immediately.
 /// The directory is re-scanned every minute, so an operator can drop a new key in without a restart.
+/// A file that cannot be used (unreadable, not PEM, not a P-256 private key) is logged and skipped.
 /// </summary>
-public sealed class SigningKeyStore(string keysPath, TimeSpan activationDelay, TimeProvider time)
+public sealed class SigningKeyStore(string keysPath, TimeSpan activationDelay, TimeProvider time, ILogger? logger = null)
 {
+    private const string P256Oid = "1.2.840.10045.3.1.7";
+
     private const string Prefix = "es256-";
     private const string TimestampFormat = "yyyyMMddHHmmss";
     private static readonly TimeSpan RescanInterval = TimeSpan.FromMinutes(1);
@@ -96,16 +100,56 @@ public sealed class SigningKeyStore(string keysPath, TimeSpan activationDelay, T
         // Unchanged files keep their already loaded key objects (and the crypto providers cached for them).
         var known = _keys.ToDictionary(k => k.FileName, StringComparer.Ordinal);
         return Directory.GetFiles(keysPath, Prefix + "*.pem")
-            .Select(path => known.GetValueOrDefault(Path.GetFileName(path)) ?? Load(path))
+            .Where(path => string.Equals(Path.GetExtension(path), ".pem", StringComparison.Ordinal))
+            .Select(path => known.GetValueOrDefault(Path.GetFileName(path)) ?? TryLoad(path))
+            .OfType<SigningKey>()
             .OrderByDescending(k => k.CreatedAt)
             .ThenByDescending(k => k.FileName, StringComparer.Ordinal)
             .ToList();
     }
 
+    private SigningKey? TryLoad(string path)
+    {
+        try
+        {
+            return Load(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+                                       or CryptographicException or InvalidDataException)
+        {
+            (logger ?? NullLogger.Instance).LogError(ex, "Skipping signing key file {File}: {Reason}", Path.GetFileName(path), ex.Message);
+            return null;
+        }
+    }
+
     private static SigningKey Load(string path)
     {
         var ecdsa = ECDsa.Create();
-        ecdsa.ImportFromPem(File.ReadAllText(path));
+        try
+        {
+            ecdsa.ImportFromPem(File.ReadAllText(path));
+
+            // ES256 only: a P-384/P-521 key would produce tokens nobody accepts (and a wrong "crv" in JWKS).
+            var publicParameters = ecdsa.ExportParameters(includePrivateParameters: false);
+            if (!publicParameters.Curve.IsNamed || publicParameters.Curve.Oid.Value != P256Oid)
+                throw new InvalidDataException($"not a P-256 key (curve {publicParameters.Curve.Oid.FriendlyName ?? publicParameters.Curve.Oid.Value})");
+
+            // A public-only PEM imports fine but cannot sign.
+            try
+            {
+                ecdsa.ExportParameters(includePrivateParameters: true);
+            }
+            catch (CryptographicException)
+            {
+                throw new InvalidDataException("public key only, a private key is required");
+            }
+        }
+        catch
+        {
+            ecdsa.Dispose();
+            throw;
+        }
+
         var stem = Path.GetFileNameWithoutExtension(path);
         var createdAt = DateTimeOffset.TryParseExact(stem[Prefix.Length..], TimestampFormat, CultureInfo.InvariantCulture,
             DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed)
@@ -124,11 +168,20 @@ public sealed class SigningKeyStore(string keysPath, TimeSpan activationDelay, T
             createdAt = createdAt.AddSeconds(1);
 
         using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+
+        // Atomic: write *.pem.tmp (not matched by the *.pem scan), then rename, so a crash or a concurrent scan
+        // never sees a half-written key file.
+        var tmp = path + ".tmp";
+        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
         if (!OperatingSystem.IsWindows())
             options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-        using (var writer = new StreamWriter(path, Encoding.ASCII, options))
+        using (var writer = new StreamWriter(tmp, Encoding.ASCII, options))
+        {
             writer.Write(ecdsa.ExportPkcs8PrivateKeyPem());
+            writer.Flush();
+            ((FileStream)writer.BaseStream).Flush(flushToDisk: true);
+        }
+        File.Move(tmp, path, overwrite: false);
 
         return Load(path);
     }

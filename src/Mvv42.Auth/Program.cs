@@ -44,7 +44,8 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(sp =>
 {
     var o = sp.GetRequiredService<IOptions<AuthOptions>>().Value;
-    return new SigningKeyStore(Path.GetFullPath(o.KeysPath), o.KeyActivationDelay, sp.GetRequiredService<TimeProvider>());
+    return new SigningKeyStore(Path.GetFullPath(o.KeysPath), o.KeyActivationDelay, sp.GetRequiredService<TimeProvider>(),
+        sp.GetRequiredService<ILogger<SigningKeyStore>>());
 });
 builder.Services.AddSingleton(sp =>
 {
