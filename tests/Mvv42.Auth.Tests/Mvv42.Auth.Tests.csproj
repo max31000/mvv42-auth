@@ -23,6 +23,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The SDK is a copy-in file for apps; compile it here to test it against the real service. -->
+    <Compile Include="..\..\sdk\dotnet\Mvv42Auth.cs" Link="Sdk\Mvv42Auth.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
 

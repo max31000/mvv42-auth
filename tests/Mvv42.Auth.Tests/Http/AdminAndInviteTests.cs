@@ -33,6 +33,20 @@ public class AdminAndInviteTests(AuthAppFactory factory) : IClassFixture<AuthApp
     }
 
     [Fact]
+    public async Task AccessToken_InAuthorizationHeader_IsIgnored()
+    {
+        var loginClient = factory.CreateClient(new() { HandleCookies = false });
+        loginClient.DefaultRequestHeaders.Add("Origin", AuthAppFactory.Origin);
+        var login = await AuthAppFactory.LoginAsync(loginClient, AuthAppFactory.AdminTelegramId);
+        var cookie = login.Headers.GetValues("Set-Cookie").Single(s => s.StartsWith("mvv42_at="));
+        var token = cookie["mvv42_at=".Length..cookie.IndexOf(';')];
+
+        var client = factory.CreateClient(new() { HandleCookies = false });
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/auth/api/admin/users")).StatusCode);
+    }
+
+    [Fact]
     public async Task AdminBootstrap_ViaAdminTelegramIds()
     {
         var admin = await AdminAsync();

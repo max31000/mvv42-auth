@@ -70,6 +70,8 @@ builder.Services.AddOptions<JwtBearerOptions>(AuthEndpoints.Scheme)
             OnMessageReceived = ctx =>
             {
                 ctx.Token = cookies.ReadAccess(ctx.Request);
+                if (string.IsNullOrEmpty(ctx.Token))
+                    ctx.NoResult(); // otherwise JwtBearer falls back to the Authorization header
                 return Task.CompletedTask;
             },
         };
