@@ -95,8 +95,17 @@ export function requestLogin(serviceId: string): void {
     shell.postMessage({ type: 'AUTH_REQUIRED', serviceId }, location.origin);
     return;
   }
-  const returnTo = location.pathname + location.search + location.hash;
-  location.assign('/?login=1&return=' + encodeURIComponent(returnTo));
+  location.assign('/?login=1&return=' + encodeURIComponent(safeReturnPath(location.pathname + location.search + location.hash)));
+}
+
+/**
+ * The shell only accepts a same-origin path starting with `/` but not `//` or `/\` (spec §9.10). A path like
+ * `//evil.example` (reachable as `https://mvv42.ru//evil.example`) would read as protocol-relative, so leading
+ * slashes collapse to one; anything with a backslash falls back to `/`.
+ */
+function safeReturnPath(path: string): string {
+  if (path.includes('\\')) return '/';
+  return '/' + path.replace(/^\/+/, '');
 }
 
 // ---------------------------------------------------------------- shell protocol

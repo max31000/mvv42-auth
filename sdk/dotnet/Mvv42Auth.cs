@@ -122,20 +122,22 @@ public static class Mvv42Auth
     private sealed class JwksConfigurationManager(ConfigurationManager<JsonWebKeySet> inner, string issuer)
         : IConfigurationManager<OpenIdConnectConfiguration>
     {
-        private JsonWebKeySet? _source;
-        private OpenIdConnectConfiguration? _config;
+        /// <summary>Source JWKS and the configuration built from it, swapped as one immutable reference.</summary>
+        private sealed record Snapshot(JsonWebKeySet Source, OpenIdConnectConfiguration Config);
+
+        private volatile Snapshot? _snapshot;
 
         public async Task<OpenIdConnectConfiguration> GetConfigurationAsync(CancellationToken cancel)
         {
             var jwks = await inner.GetConfigurationAsync(cancel).ConfigureAwait(false);
-            var cached = _config;
-            if (cached is not null && ReferenceEquals(jwks, _source))
-                return cached;
+            var current = _snapshot;
+            if (current is not null && ReferenceEquals(current.Source, jwks))
+                return current.Config;
 
             var config = new OpenIdConnectConfiguration { Issuer = issuer, JsonWebKeySet = jwks };
             foreach (var key in jwks.GetSigningKeys())
                 config.SigningKeys.Add(key);
-            (_source, _config) = (jwks, config);
+            _snapshot = new Snapshot(jwks, config); // a concurrent caller may build the same one: harmless
             return config;
         }
 

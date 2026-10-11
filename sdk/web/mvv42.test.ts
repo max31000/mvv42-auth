@@ -153,6 +153,20 @@ describe('requestLogin', () => {
 
     expect(assign).toHaveBeenCalledWith('/?login=1&return=' + encodeURIComponent('/bonds/positions?x=1#h'));
   });
+
+  it.each([
+    ['//evil.example/x', '', '/evil.example/x'],
+    ['///evil.example', '?a=1', '/evil.example?a=1'],
+    ['/bonds/', '?q=a\\b', '/'],
+    ['/bonds/\\evil', '', '/'],
+  ])('normalizes the return path %s%s → %s', (pathname, search, expected) => {
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...window.location, origin: ORIGIN, pathname, search, hash: '', assign });
+
+    requestLogin('bonds');
+
+    expect(assign).toHaveBeenCalledWith('/?login=1&return=' + encodeURIComponent(expected));
+  });
 });
 
 describe('shell messages', () => {
