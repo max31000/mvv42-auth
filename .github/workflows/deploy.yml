@@ -1,0 +1,130 @@
+# Test → build image → push to GHCR → run on the VDS.
+# One-time server prerequisites (NOT automated, see README "Deploy"): database mvv42_auth + user in
+# cashpulse-mysql, nginx location /auth/ (mvv42-infra), repo secrets listed below.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-mvv42-auth
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/max31000/mvv42-auth
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - run: dotnet test Mvv42.Auth.sln -c Release
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Mvv42.Auth/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run container on VDS
+        uses: appleboy/ssh-action@v1
+        env:
+          AUTH_DB_CONNECTION_STRING: ${{ secrets.AUTH_DB_CONNECTION_STRING }}
+          AUTH_TELEGRAM_BOT_TOKEN: ${{ secrets.AUTH_TELEGRAM_BOT_TOKEN }}
+          AUTH_ADMIN_TELEGRAM_IDS: ${{ secrets.AUTH_ADMIN_TELEGRAM_IDS }}
+          IMAGE_REF: ${{ env.IMAGE }}:sha-${{ github.sha }}
+        with:
+          host: ${{ secrets.VDS_HOST }}
+          username: ${{ secrets.VDS_USER }}
+          key: ${{ secrets.VDS_SSH_KEY }}
+          envs: AUTH_DB_CONNECTION_STRING,AUTH_TELEGRAM_BOT_TOKEN,AUTH_ADMIN_TELEGRAM_IDS,IMAGE_REF
+          script: |
+            set -eu
+
+            # Secrets go to a root-only env-file instead of the docker command line (ps / shell history).
+            install -d -m 700 /etc/mvv42-auth
+            umask 077
+            {
+              printf 'ConnectionStrings__Auth=%s\n' "$AUTH_DB_CONNECTION_STRING"
+              printf 'Telegram__BotToken=%s\n' "$AUTH_TELEGRAM_BOT_TOKEN"
+              printf 'Telegram__BotUsername=%s\n' 'mv_cashpulse_bot'
+              printf 'Auth__AdminTelegramIds=%s\n' "$AUTH_ADMIN_TELEGRAM_IDS"
+              printf 'Auth__AllowedOrigins=%s\n' 'https://mvv42.ru'
+              printf 'Auth__KeysPath=%s\n' '/var/lib/mvv42-auth/keys'
+            } > /etc/mvv42-auth/auth.env.tmp
+            chmod 600 /etc/mvv42-auth/auth.env.tmp
+            mv /etc/mvv42-auth/auth.env.tmp /etc/mvv42-auth/auth.env
+
+            # Signing keys persist across deploys; the container runs as uid 1654 ("app" in aspnet:8.0).
+            install -d -m 700 -o 1654 -g 1654 /var/lib/mvv42-auth/keys
+
+            docker pull "$IMAGE_REF"
+            docker rm -f mvv42-auth 2>/dev/null || true
+            docker run -d \
+              --name mvv42-auth \
+              --restart unless-stopped \
+              --network cashpulse-network \
+              -p 127.0.0.1:5010:8080 \
+              -v /var/lib/mvv42-auth/keys:/var/lib/mvv42-auth/keys \
+              --env-file /etc/mvv42-auth/auth.env \
+              "$IMAGE_REF"
+
+            healthy=0
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:5010/auth/health >/dev/null; then healthy=1; break; fi
+              sleep 1
+            done
+            if [ "$healthy" != 1 ]; then
+              echo "mvv42-auth did not become healthy in 30s"
+              docker logs --tail 100 mvv42-auth || true
+              exit 1
+            fi
+            echo "mvv42-auth is healthy"
+            docker image prune -f
+
+  notify:
+    needs: [test, image, deploy]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Telegram notification
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${CHAT_ID}" \
+            --data-urlencode text="mvv42-auth deploy failed: ${RUN_URL}"

@@ -1,6 +1,6 @@
 using Dapper;
-using MySqlConnector;
 using Mvv42.Auth.Telegram;
+using MySqlConnector;
 
 namespace Mvv42.Auth.Data;
 

@@ -70,7 +70,11 @@ public sealed class SessionService(IAuthStore store, IOptions<AuthOptions> optio
             {
                 return new(RefreshStatus.Rotated, session with
                 {
-                    PrevRefreshHash = hash, RefreshHash = Hash(newToken), RotatedAt = now, LastUsedAt = now, ExpiresAt = expiresAt,
+                    PrevRefreshHash = hash,
+                    RefreshHash = Hash(newToken),
+                    RotatedAt = now,
+                    LastUsedAt = now,
+                    ExpiresAt = expiresAt,
                 }, newToken);
             }
 

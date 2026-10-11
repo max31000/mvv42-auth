@@ -90,8 +90,12 @@ public static partial class AdminEndpoints
             var code = SecretTokens.New(16);
             var invite = new Invite
             {
-                CodeHash = SecretTokens.Sha256Hex(code), AppId = body.AppId!, MaxUses = body.MaxUses,
-                ExpiresAt = now.AddHours(body.ExpiresInHours), CreatedBy = ctx.User.CurrentUserId(), CreatedAt = now,
+                CodeHash = SecretTokens.Sha256Hex(code),
+                AppId = body.AppId!,
+                MaxUses = body.MaxUses,
+                ExpiresAt = now.AddHours(body.ExpiresInHours),
+                CreatedBy = ctx.User.CurrentUserId(),
+                CreatedAt = now,
             };
             var id = await store.CreateInviteAsync(invite);
             return Results.Ok(new { id, code, invite.AppId, invite.MaxUses, invite.ExpiresAt });

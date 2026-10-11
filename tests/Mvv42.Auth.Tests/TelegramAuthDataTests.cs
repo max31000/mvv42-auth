@@ -33,7 +33,9 @@ public class TelegramAuthDataTests
     {
         var profile = TelegramAuthData.ToProfile(new Dictionary<string, string>
         {
-            ["id"] = "42", ["first_name"] = "Max", ["photo_url"] = "https://t.me/p.jpg",
+            ["id"] = "42",
+            ["first_name"] = "Max",
+            ["photo_url"] = "https://t.me/p.jpg",
         });
         Assert.Equal(new TelegramProfile(42, "Max", null, null, "https://t.me/p.jpg"), profile);
     }

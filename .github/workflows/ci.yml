@@ -1,0 +1,75 @@
+# Build and test on every push / PR. Deployment lives in deploy.yml.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      - run: dotnet restore Mvv42.Auth.sln
+      - run: dotnet build Mvv42.Auth.sln --no-restore -c Release
+      - run: dotnet format Mvv42.Auth.sln --verify-no-changes --no-restore
+      # MySQL store tests are skipped here (no MVV42_AUTH_TEST_MYSQL); they run in the next job.
+      - run: dotnet test Mvv42.Auth.sln --no-build -c Release
+
+  mysql-store:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: mvv42_auth_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Store contract tests against MySQL 8
+        run: dotnet test tests/Mvv42.Auth.Tests/Mvv42.Auth.Tests.csproj -c Release --filter "Category=MySql"
+        env:
+          MVV42_AUTH_TEST_MYSQL: Server=127.0.0.1;Port=3306;Database=mvv42_auth_test;User ID=root;Password=root
+
+  web-sdk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: sdk/web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test

@@ -15,11 +15,11 @@ public class AccessPolicyTests
     ];
 
     [Theory]
-    // isAdmin, grants,          expected
-    [InlineData(false, "",       "pub,pub_anon")]
-    [InlineData(false, "inv",    "inv,pub,pub_anon")]
+    // isAdmin, grants, expected
+    [InlineData(false, "", "pub,pub_anon")]
+    [InlineData(false, "inv", "inv,pub,pub_anon")]
     [InlineData(false, "inv,adm", "inv,pub,pub_anon")] // a grant does not open an admin-only app
-    [InlineData(true,  "",       "adm,inv,inv_anon,pub,pub_anon")]
+    [InlineData(true, "", "adm,inv,inv_anon,pub,pub_anon")]
     public void AllowedApps_Matrix(bool isAdmin, string grants, string expected)
     {
         var allowed = AccessPolicy.AllowedApps(isAdmin, Apps, grants.Split(',', StringSplitOptions.RemoveEmptyEntries));

@@ -34,7 +34,11 @@ public sealed class InMemoryAuthStore : IAuthStore
         var existing = index >= 0 ? _users[index] : new User { Id = _nextId++, TelegramId = p.TelegramId, CreatedAt = now };
         var user = existing with
         {
-            FirstName = p.FirstName, LastName = p.LastName, Username = p.Username, PhotoUrl = p.PhotoUrl, LastLoginAt = now,
+            FirstName = p.FirstName,
+            LastName = p.LastName,
+            Username = p.Username,
+            PhotoUrl = p.PhotoUrl,
+            LastLoginAt = now,
         };
         if (index >= 0) _users[index] = user; else _users.Add(user);
         return user;
@@ -102,7 +106,11 @@ public sealed class InMemoryAuthStore : IAuthStore
         if (index < 0) return false;
         _sessions[index] = _sessions[index] with
         {
-            PrevRefreshHash = expectedHash, RefreshHash = newHash, RotatedAt = rotatedAt, LastUsedAt = rotatedAt, ExpiresAt = expiresAt,
+            PrevRefreshHash = expectedHash,
+            RefreshHash = newHash,
+            RotatedAt = rotatedAt,
+            LastUsedAt = rotatedAt,
+            ExpiresAt = expiresAt,
         };
         return true;
     });

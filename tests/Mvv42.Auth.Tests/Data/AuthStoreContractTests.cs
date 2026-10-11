@@ -104,8 +104,13 @@ public abstract class AuthStoreContractTests
         var user = await NewUser();
         var session = new Session
         {
-            UserId = user.Id, FamilyId = Guid.NewGuid().ToString(), RefreshHash = Hash(),
-            CreatedAt = T0, ExpiresAt = expiresAt ?? T0.AddDays(30), LastUsedAt = T0, UserAgent = "test",
+            UserId = user.Id,
+            FamilyId = Guid.NewGuid().ToString(),
+            RefreshHash = Hash(),
+            CreatedAt = T0,
+            ExpiresAt = expiresAt ?? T0.AddDays(30),
+            LastUsedAt = T0,
+            UserAgent = "test",
         };
         var id = await Store.CreateSessionAsync(session);
         return session with { Id = id };
