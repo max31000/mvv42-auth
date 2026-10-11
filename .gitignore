@@ -1,0 +1,11 @@
+bin/
+obj/
+*.user
+.vs/
+.idea/
+TestResults/
+
+# local dev signing keys (Auth:KeysPath in appsettings.Development.json)
+.keys/
+
+node_modules/
