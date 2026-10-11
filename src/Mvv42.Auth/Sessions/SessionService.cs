@@ -1,7 +1,4 @@
-using System.Security.Cryptography;
-using System.Text;
 using Microsoft.Extensions.Options;
-using Microsoft.IdentityModel.Tokens;
 using Mvv42.Auth.Data;
 using Mvv42.Auth.Options;
 
@@ -99,10 +96,9 @@ public sealed class SessionService(IAuthStore store, IOptions<AuthOptions> optio
             await store.RevokeSessionAsync(session.Id, time.GetUtcNow().UtcDateTime);
     }
 
-    public static string Hash(string token) =>
-        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token))).ToLowerInvariant();
+    public static string Hash(string token) => SecretTokens.Sha256Hex(token);
 
-    private static string NewToken() => Base64UrlEncoder.Encode(RandomNumberGenerator.GetBytes(32));
+    private static string NewToken() => SecretTokens.New();
 
     private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
 }
