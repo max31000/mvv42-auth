@@ -58,6 +58,9 @@ jobs:
 
   deploy:
     needs: image
+    # Off until the server side is bootstrapped (DB, secrets). Enable with:
+    #   gh variable set AUTH_DEPLOY_ENABLED -b true -R max31000/mvv42-auth
+    if: vars.AUTH_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
