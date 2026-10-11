@@ -13,13 +13,14 @@ public static class AuthEndpoints
     /// <summary>JwtBearer scheme reading the access cookie (the service's own tokens).</summary>
     public const string Scheme = "mvv42";
     public const string AdminPolicy = "admin";
+    public const string RateLimitPolicy = "per-ip";
 
     /// <summary>Maps <c>/api/telegram|refresh|logout|me</c>; returns the <c>/api</c> group (OriginGuard applied).</summary>
     public static RouteGroupBuilder MapAuthApi(this IEndpointRouteBuilder app)
     {
         var api = app.MapGroup("/api").AddEndpointFilter<OriginGuard>();
-        api.MapPost("/telegram", TelegramLogin);
-        api.MapPost("/refresh", Refresh);
+        api.MapPost("/telegram", TelegramLogin).RequireRateLimiting(RateLimitPolicy);
+        api.MapPost("/refresh", Refresh).RequireRateLimiting(RateLimitPolicy);
         api.MapPost("/logout", Logout);
         api.MapGet("/me", Me);
         return api;
@@ -33,7 +34,7 @@ public static class AuthEndpoints
     /// <summary>POST /api/telegram — raw Login Widget object → session, both cookies, /me payload.</summary>
     private static async Task<IResult> TelegramLogin(
         JsonElement body, HttpContext ctx, TelegramVerifier verifier, IAuthStore store, SessionService sessions,
-        UserAccessService access, AuthCookies cookies, TimeProvider time)
+        UserAccessService access, AuthCookies cookies, TimeProvider time, TelegramReplayCache replay)
     {
         var fields = TelegramAuthData.ToFields(body);
         if (fields is null)
@@ -44,6 +45,8 @@ public static class AuthEndpoints
             return Error("telegram_not_configured", StatusCodes.Status503ServiceUnavailable);
         if (!check.Ok)
             return Error(check.Error.ToString(), check.IsMalformed ? StatusCodes.Status400BadRequest : StatusCodes.Status401Unauthorized);
+        if (!replay.TryUse(fields["hash"]))
+            return Error("Replayed", StatusCodes.Status401Unauthorized);
 
         var user = await store.UpsertUserAsync(TelegramAuthData.ToProfile(fields), time.GetUtcNow().UtcDateTime);
 
@@ -82,7 +85,11 @@ public static class AuthEndpoints
         UserAccess? userAccess = null;
         var auth = await ctx.AuthenticateAsync(Scheme);
         if (auth.Succeeded && auth.Principal.CurrentUserId() is { } userId)
+        {
             userAccess = await access.GetAsync(userId);
+            if (userAccess is null)
+                cookies.Clear(ctx.Response); // valid token of a deleted user: its session is gone too
+        }
         else if (cookies.ReadRefresh(ctx.Request) is not null)
             userAccess = await RefreshCookiesAsync(ctx, sessions, access, cookies);
 

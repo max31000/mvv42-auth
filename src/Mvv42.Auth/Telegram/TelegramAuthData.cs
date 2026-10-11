@@ -10,7 +10,8 @@ public static class TelegramAuthData
 {
     /// <summary>
     /// Converts the raw widget object to string fields for verification. Only fields actually present
-    /// are kept (nulls are dropped — the widget never sends them); numbers keep their raw JSON text.
+    /// are kept (nulls are dropped — the widget never sends them); numbers keep their raw JSON text, booleans
+    /// become <c>"true"</c>/<c>"false"</c> (how Telegram puts them into the data-check-string).
     /// Returns null when the body is not a flat JSON object.
     /// </summary>
     public static Dictionary<string, string>? ToFields(JsonElement body)
@@ -30,6 +31,12 @@ public static class TelegramAuthData
                     break;
                 case JsonValueKind.Number:
                     fields[property.Name] = property.Value.GetRawText();
+                    break;
+                case JsonValueKind.True:
+                    fields[property.Name] = "true";
+                    break;
+                case JsonValueKind.False:
+                    fields[property.Name] = "false";
                     break;
                 default:
                     return null;

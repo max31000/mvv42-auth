@@ -25,6 +25,7 @@ public class AuthAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("Auth:AdminTelegramIds", AdminTelegramId.ToString());
         builder.UseSetting("Auth:SecureCookies", "false");
         builder.UseSetting("Telegram:BotToken", BotToken);
+        builder.UseSetting("Auth:RateLimitPerMinute", "100000"); // tests share one (null) remote IP
     }
 
     /// <summary>Client with a cookie container and a same-origin Origin header (as a browser fetch would send).</summary>
@@ -35,12 +36,19 @@ public class AuthAppFactory : WebApplicationFactory<Program>
         return client;
     }
 
+    private static readonly long AuthDateBase = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    private static long _widgetCounter;
+
+    /// <summary>
+    /// Signed widget data. Every call gets a distinct auth_date (strictly decreasing, still within the window),
+    /// so two logins of the same user are never byte-identical and do not trip the replay cache.
+    /// </summary>
     public static Dictionary<string, string> WidgetData(long telegramId, string firstName = "Max") =>
         TelegramVerifierTests.Signed(new Dictionary<string, string>
         {
             ["id"] = telegramId.ToString(),
             ["first_name"] = firstName,
-            ["auth_date"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(),
+            ["auth_date"] = (AuthDateBase - Interlocked.Increment(ref _widgetCounter)).ToString(),
         }, BotToken);
 
     /// <summary>Widget JSON as the browser sends it: id and auth_date are numbers.</summary>

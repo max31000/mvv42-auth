@@ -1,5 +1,8 @@
+using System.Net;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using Mvv42.Auth.Access;
 using Mvv42.Auth.Data;
@@ -16,14 +19,39 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));
 builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.Section));
 
-// nginx terminates TLS and proxies /auth/ to 127.0.0.1:5010. Inside the container the peer is the
-// docker bridge gateway, not loopback, so the default KnownProxies would ignore X-Forwarded-*.
-// The port is published on 127.0.0.1 only, therefore trusting any peer is safe here.
-builder.Services.Configure<ForwardedHeadersOptions>(o =>
+// nginx terminates TLS and proxies /auth/ to 127.0.0.1:5010. Inside the container the peer is the gateway of
+// the docker network (docker-proxy), not loopback. Only loopback and Auth:TrustedProxyCidrs (deploy sets the
+// exact gateway of cashpulse-network) may set X-Forwarded-*: other containers on the network must not be able
+// to spoof the client IP the rate limiter partitions on.
+builder.Services.AddOptions<ForwardedHeadersOptions>()
+    .Configure<IOptions<AuthOptions>>((o, auth) =>
+    {
+        o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        o.ForwardLimit = 1; // exactly one proxy hop (nginx)
+        o.KnownProxies.Clear();
+        o.KnownNetworks.Clear();
+        o.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(IPAddress.Parse("127.0.0.0"), 8));
+        o.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(IPAddress.IPv6Loopback, 128));
+        foreach (var network in auth.Value.TrustedProxyNetworks())
+            o.KnownNetworks.Add(network);
+    });
+
+// Defence in depth behind nginx limit_req: one fixed window per client IP shared by /telegram, /refresh and
+// /invites/redeem (the endpoints that verify secrets).
+builder.Services.AddRateLimiter(o =>
 {
-    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-    o.KnownNetworks.Clear();
-    o.KnownProxies.Clear();
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.OnRejected = (ctx, cancel) =>
+    {
+        ctx.HttpContext.Response.ContentType = "application/json";
+        return new ValueTask(ctx.HttpContext.Response.WriteAsync("""{"error":"rate_limited"}""", cancel));
+    };
+    o.AddPolicy(AuthEndpoints.RateLimitPolicy, ctx =>
+    {
+        var limit = ctx.RequestServices.GetRequiredService<IOptions<AuthOptions>>().Value.RateLimitPerMinute;
+        return RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = limit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 });
+    });
 });
 
 // ---- storage: MySQL when a connection string is set, otherwise in-memory (Development/tests only;
@@ -51,6 +79,13 @@ builder.Services.AddSingleton(sp =>
 {
     var t = sp.GetRequiredService<IOptions<TelegramOptions>>().Value;
     return new TelegramVerifier(t.BotToken, t.AuthDateWindow, t.AuthDateFutureSkew);
+});
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton(sp =>
+{
+    // A payload is accepted while auth_date is within the window (+ future skew), so remember it that long.
+    var t = sp.GetRequiredService<IOptions<TelegramOptions>>().Value;
+    return new TelegramReplayCache(sp.GetRequiredService<IMemoryCache>(), t.AuthDateWindow + t.AuthDateFutureSkew + TimeSpan.FromMinutes(1));
 });
 builder.Services.AddSingleton<AccessTokenIssuer>();
 builder.Services.AddSingleton<SessionService>();
@@ -82,6 +117,20 @@ builder.Services.AddAuthorizationBuilder()
 
 var app = builder.Build();
 
+// Malformed security settings stop the service in every environment (instead of failing per request).
+var authOptions = app.Services.GetRequiredService<IOptions<AuthOptions>>().Value;
+try
+{
+    authOptions.AdminTelegramIdSet();
+    authOptions.TrustedProxyNetworks();
+}
+catch (FormatException ex)
+{
+    throw new InvalidOperationException(ex.Message, ex);
+}
+if (authOptions.RateLimitPerMinute < 1)
+    throw new InvalidOperationException("Auth:RateLimitPerMinute must be positive.");
+
 // Outside Development/Testing the service must not start half-configured.
 if (!app.Environment.IsDevelopment() && !app.Environment.IsEnvironment("Testing"))
 {
@@ -104,6 +153,7 @@ app.UseForwardedHeaders();
 // nginx does not strip the prefix: /auth/api/... arrives as is (spec §9.8).
 app.UsePathBase("/auth");
 app.UseRouting(); // explicitly after UsePathBase so routes match the path without the prefix
+app.UseRateLimiter();
 
 app.UseAuthentication();
 app.UseAuthorization();

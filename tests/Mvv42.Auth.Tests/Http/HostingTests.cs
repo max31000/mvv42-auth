@@ -1,6 +1,11 @@
+using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace Mvv42.Auth.Tests.Http;
 
@@ -43,6 +48,62 @@ public class HostingTests(AuthAppFactory factory) : IClassFixture<AuthAppFactory
 
         var ex = Assert.Throws<InvalidOperationException>(() => production.CreateClient());
         Assert.Contains("ConnectionStrings:Auth", ex.Message);
+    }
+
+    [Fact]
+    public void MalformedAdminTelegramIds_RefuseToStart()
+    {
+        var broken = factory.WithWebHostBuilder(b => b.UseSetting("Auth:AdminTelegramIds", "1000,abc"));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => broken.CreateClient());
+        Assert.Contains("Auth:AdminTelegramIds", ex.Message);
+    }
+
+    [Fact]
+    public void ForwardedHeaders_TrustOnlyLoopbackAndConfiguredProxyNetworks()
+    {
+        var configured = factory.WithWebHostBuilder(b => b.UseSetting("Auth:TrustedProxyCidrs", "172.18.0.1/32, 10.10.0.0/16"));
+
+        var options = configured.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value;
+
+        Assert.Empty(options.KnownProxies);
+        Assert.Equal(
+            ["10.10.0.0/16", "127.0.0.0/8", "172.18.0.1/32", "::1/128"],
+            options.KnownNetworks.Select(n => $"{n.Prefix}/{n.PrefixLength}").Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void ForwardedHeaders_DefaultTrustsDockerBridgeRange()
+    {
+        var options = factory.Services.GetRequiredService<IOptions<ForwardedHeadersOptions>>().Value;
+        Assert.Contains(options.KnownNetworks, n => n.Prefix.ToString() == "172.16.0.0" && n.PrefixLength == 12);
+        Assert.DoesNotContain(options.KnownNetworks, n => n.PrefixLength == 0);
+    }
+
+    [Fact]
+    public void MalformedTrustedProxyCidrs_RefuseToStart()
+    {
+        var broken = factory.WithWebHostBuilder(b => b.UseSetting("Auth:TrustedProxyCidrs", "172.18.0.1/99"));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => broken.CreateClient());
+        Assert.Contains("Auth:TrustedProxyCidrs", ex.Message);
+    }
+
+    [Fact]
+    public async Task SensitiveEndpoints_AreRateLimitedPerIp()
+    {
+        var limited = factory.WithWebHostBuilder(b => b.UseSetting("Auth:RateLimitPerMinute", "2"));
+        var client = limited.CreateClient();
+        client.DefaultRequestHeaders.Add("Origin", AuthAppFactory.Origin);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/auth/api/refresh", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/auth/api/refresh", null)).StatusCode);
+        var third = await client.PostAsync("/auth/api/telegram", AuthAppFactory.WidgetJson(AuthAppFactory.WidgetData(AuthAppFactory.NewTelegramId())));
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
+        Assert.Equal("rate_limited", (await third.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        // /me and /health are not limited
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/auth/api/me")).StatusCode);
     }
 
     [Fact]

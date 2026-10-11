@@ -21,11 +21,21 @@ public class TelegramAuthDataTests
     [Theory]
     [InlineData("""{"id":{"x":1}}""")]
     [InlineData("""{"id":[1]}""")]
-    [InlineData("""{"id":true}""")]
     [InlineData("""[1,2]""")]
     public void ToFields_RejectsNonFlatObjects(string json)
     {
         Assert.Null(TelegramAuthData.ToFields(Json(json)));
+    }
+
+    [Fact]
+    public void ToFields_JsonBooleans_BecomeTrueFalseStrings()
+    {
+        // The widget may send e.g. "allows_write_to_pm": true; Telegram signs it as the string "true".
+        var fields = TelegramAuthData.ToFields(Json("""{"id":42,"allows_write_to_pm":true,"x":false}"""));
+
+        Assert.NotNull(fields);
+        Assert.Equal("true", fields["allows_write_to_pm"]);
+        Assert.Equal("false", fields["x"]);
     }
 
     [Fact]

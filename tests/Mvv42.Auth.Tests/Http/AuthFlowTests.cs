@@ -2,6 +2,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Mvv42.Auth.Data;
 
 namespace Mvv42.Auth.Tests.Http;
 
@@ -126,6 +128,37 @@ public class AuthFlowTests(AuthAppFactory factory) : IClassFixture<AuthAppFactor
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(JsonValueKind.Null, (await Json(response)).GetProperty("user").ValueKind);
+        Assert.Contains(SetCookies(response), c => c.StartsWith("mvv42_rt=;"));
+    }
+
+    [Fact]
+    public async Task Telegram_ReplayedWidgetData_Is401()
+    {
+        var fields = AuthAppFactory.WidgetData(AuthAppFactory.NewTelegramId());
+
+        var first = await RawClient().PostAsync("/auth/api/telegram", AuthAppFactory.WidgetJson(fields));
+        var replay = await RawClient().PostAsync("/auth/api/telegram", AuthAppFactory.WidgetJson(fields));
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+        Assert.Equal("Replayed", (await Json(replay)).GetProperty("error").GetString());
+        Assert.Empty(SetCookies(replay));
+    }
+
+    [Fact]
+    public async Task Me_WithValidAccessToken_ButDeletedUser_IsAnonymous_AndClearsCookies()
+    {
+        var tg = AuthAppFactory.NewTelegramId();
+        var login = await AuthAppFactory.LoginAsync(RawClient(), tg);
+        var cookie = $"mvv42_at={CookieValue(login, "mvv42_at")}; mvv42_rt={CookieValue(login, "mvv42_rt")}";
+        var userId = (await Json(login)).GetProperty("user").GetProperty("id").GetInt64();
+
+        ((InMemoryAuthStore)factory.Services.GetRequiredService<IAuthStore>()).DeleteUser(userId);
+        var response = await RawClient(cookie).GetAsync("/auth/api/me");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(JsonValueKind.Null, (await Json(response)).GetProperty("user").ValueKind);
+        Assert.Contains(SetCookies(response), c => c.StartsWith("mvv42_at=;"));
         Assert.Contains(SetCookies(response), c => c.StartsWith("mvv42_rt=;"));
     }
 

@@ -27,5 +27,5 @@ public static class InviteEndpoints
 
             cookies.SetAccess(ctx.Response, access.Issue(userAccess));
             return Results.Ok(UserAccessService.ToMe(userAccess));
-        }).RequireAuthorization();
+        }).RequireAuthorization().RequireRateLimiting(AuthEndpoints.RateLimitPolicy);
 }

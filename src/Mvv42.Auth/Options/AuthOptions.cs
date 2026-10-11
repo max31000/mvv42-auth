@@ -1,3 +1,7 @@
+using System.Globalization;
+using System.Net;
+using AspNetIPNetwork = Microsoft.AspNetCore.HttpOverrides.IPNetwork;
+
 namespace Mvv42.Auth.Options;
 
 /// <summary>Section <c>Auth</c>. Env vars use <c>Auth__*</c>.</summary>
@@ -11,8 +15,31 @@ public sealed class AuthOptions
     /// <summary>Comma-separated origins allowed for unsafe methods (CSRF guard).</summary>
     public string AllowedOrigins { get; set; } = "https://mvv42.ru";
 
-    /// <summary>Comma-separated telegram ids that are always admins (in addition to <c>users.is_admin</c>).</summary>
-    public string AdminTelegramIds { get; set; } = "";
+    /// <summary>
+    /// Comma-separated telegram ids that are always admins (in addition to <c>users.is_admin</c>).
+    /// Parsed once; a malformed value stops the service at startup.
+    /// </summary>
+    public string AdminTelegramIds
+    {
+        get => _adminTelegramIds;
+        set
+        {
+            _adminTelegramIds = value;
+            _adminTelegramIdSet = null;
+        }
+    }
+
+    /// <summary>
+    /// Comma-separated IPs/CIDRs whose <c>X-Forwarded-For/Proto</c> are trusted (loopback always is). nginx on the host
+    /// reaches the container through docker-proxy, so the peer the app sees is the gateway of the docker network the
+    /// published port maps through: <c>docker network inspect cashpulse-network -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'</c>.
+    /// The deploy workflow sets it to exactly that gateway (/32). Default: docker's default address pool 172.16.0.0/12
+    /// (any container on a docker network could then spoof X-Forwarded-For).
+    /// </summary>
+    public string TrustedProxyCidrs { get; set; } = "172.16.0.0/12";
+
+    /// <summary>App-level limit (defence in depth behind nginx limit_req) for /telegram, /refresh, /invites/redeem per client IP.</summary>
+    public int RateLimitPerMinute { get; set; } = 30;
 
     public string Issuer { get; set; } = "https://mvv42.ru/auth";
     public string Audience { get; set; } = "mvv42";
@@ -40,8 +67,29 @@ public sealed class AuthOptions
     public IReadOnlySet<string> AllowedOriginSet() =>
         SplitList(AllowedOrigins).Select(o => o.TrimEnd('/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    public IReadOnlySet<long> AdminTelegramIdSet() =>
-        SplitList(AdminTelegramIds).Select(long.Parse).ToHashSet();
+    private string _adminTelegramIds = "";
+    private IReadOnlySet<long>? _adminTelegramIdSet;
+
+    /// <exception cref="FormatException">A value is not a positive telegram id.</exception>
+    public IReadOnlySet<long> AdminTelegramIdSet() => _adminTelegramIdSet ??= SplitList(AdminTelegramIds)
+        .Select(item => long.TryParse(item, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id > 0
+            ? id
+            : throw new FormatException($"Auth:AdminTelegramIds: '{item}' is not a telegram id"))
+        .ToHashSet();
+
+    /// <exception cref="FormatException">A value is not an IP address or CIDR.</exception>
+    public IReadOnlyList<AspNetIPNetwork> TrustedProxyNetworks() => SplitList(TrustedProxyCidrs).Select(item =>
+    {
+        var slash = item.IndexOf('/');
+        var address = slash < 0 ? item : item[..slash];
+        if (!IPAddress.TryParse(address, out var ip))
+            throw new FormatException($"Auth:TrustedProxyCidrs: '{item}' is not an IP address or CIDR");
+        var maxPrefix = ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128;
+        var prefix = maxPrefix;
+        if (slash >= 0 && (!int.TryParse(item[(slash + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out prefix) || prefix > maxPrefix))
+            throw new FormatException($"Auth:TrustedProxyCidrs: '{item}' has an invalid prefix length");
+        return new AspNetIPNetwork(ip, prefix);
+    }).ToList();
 
     private static IEnumerable<string> SplitList(string? value) =>
         (value ?? "").Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
