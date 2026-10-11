@@ -74,7 +74,17 @@ jobs:
             set -eu
 
             # Secrets go to a root-only env-file instead of the docker command line (ps / shell history).
-            install -d -m 700 /etc/mvv42-auth
+            # Path per mvv42-infra docs/conventions.md: /etc/mvv42/env/<container>.env (dir 700, file 600).
+            ENV_DIR=/etc/mvv42/env
+            ENV_FILE="$ENV_DIR/mvv42-auth.env"
+            NETWORK=cashpulse-network
+            install -d -m 700 "$ENV_DIR"
+
+            # X-Forwarded-* are trusted only from the gateway of the network the published port maps through
+            # (nginx on the host -> docker-proxy -> container).
+            GATEWAY="$(docker network inspect "$NETWORK" -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | awk '{print $1}')"
+            [ -n "$GATEWAY" ] || { echo "cannot determine the gateway of $NETWORK" >&2; exit 1; }
+
             umask 077
             {
               printf 'ConnectionStrings__Auth=%s\n' "$AUTH_DB_CONNECTION_STRING"
@@ -83,36 +93,62 @@ jobs:
               printf 'Auth__AdminTelegramIds=%s\n' "$AUTH_ADMIN_TELEGRAM_IDS"
               printf 'Auth__AllowedOrigins=%s\n' 'https://mvv42.ru'
               printf 'Auth__KeysPath=%s\n' '/var/lib/mvv42-auth/keys'
-            } > /etc/mvv42-auth/auth.env.tmp
-            chmod 600 /etc/mvv42-auth/auth.env.tmp
-            mv /etc/mvv42-auth/auth.env.tmp /etc/mvv42-auth/auth.env
+              printf 'Auth__TrustedProxyCidrs=%s\n' "$GATEWAY/32"
+            } > "$ENV_FILE.tmp"
+            chmod 600 "$ENV_FILE.tmp"
+            mv "$ENV_FILE.tmp" "$ENV_FILE"
 
             # Signing keys persist across deploys; the container runs as uid 1654 ("app" in aspnet:8.0).
             install -d -m 700 -o 1654 -g 1654 /var/lib/mvv42-auth/keys
 
             docker pull "$IMAGE_REF"
-            docker rm -f mvv42-auth 2>/dev/null || true
-            docker run -d \
-              --name mvv42-auth \
-              --restart unless-stopped \
-              --network cashpulse-network \
-              -p 127.0.0.1:5010:8080 \
-              -v /var/lib/mvv42-auth/keys:/var/lib/mvv42-auth/keys \
-              --env-file /etc/mvv42-auth/auth.env \
-              "$IMAGE_REF"
 
-            healthy=0
-            for i in $(seq 1 30); do
-              if curl -fsS http://127.0.0.1:5010/auth/health >/dev/null; then healthy=1; break; fi
-              sleep 1
-            done
-            if [ "$healthy" != 1 ]; then
-              echo "mvv42-auth did not become healthy in 30s"
-              docker logs --tail 100 mvv42-auth || true
+            # Image the current container runs: the rollback target (empty on the very first deploy).
+            OLD_IMAGE="$(docker inspect -f '{{.Config.Image}}' mvv42-auth 2>/dev/null || true)"
+            echo "previous image: ${OLD_IMAGE:-<none>}"
+
+            # Identical arguments for the new and (on rollback) the old image.
+            run_container() {
+              docker run -d \
+                --name mvv42-auth \
+                --restart unless-stopped \
+                --network "$NETWORK" \
+                -p 127.0.0.1:5010:8080 \
+                -v /var/lib/mvv42-auth/keys:/var/lib/mvv42-auth/keys \
+                --env-file "$ENV_FILE" \
+                "$1"
+            }
+
+            wait_healthy() {
+              for i in $(seq 1 30); do
+                if curl -fsS --max-time 3 http://127.0.0.1:5010/auth/health >/dev/null; then return 0; fi
+                sleep 1
+              done
+              return 1
+            }
+
+            docker rm -f mvv42-auth 2>/dev/null || true
+            if run_container "$IMAGE_REF" && wait_healthy; then
+              echo "mvv42-auth is healthy ($IMAGE_REF)"
+              docker image prune -f
+              exit 0
+            fi
+
+            echo "!! mvv42-auth ($IMAGE_REF) did not become healthy in 30s"
+            docker logs --tail 100 mvv42-auth 2>&1 || true
+            docker rm -f mvv42-auth 2>/dev/null || true
+            if [ -z "$OLD_IMAGE" ]; then
+              echo "!! first deploy: nothing to roll back to"
               exit 1
             fi
-            echo "mvv42-auth is healthy"
-            docker image prune -f
+            echo "!! rolling back to $OLD_IMAGE"
+            if run_container "$OLD_IMAGE" && wait_healthy; then
+              echo "!! rolled back, previous image is healthy again"
+            else
+              echo "!! ROLLBACK FAILED, previous image not healthy either - fix by hand"
+              docker logs --tail 50 mvv42-auth 2>&1 || true
+            fi
+            exit 1
 
   notify:
     needs: [test, image, deploy]
