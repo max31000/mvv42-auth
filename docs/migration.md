@@ -270,6 +270,9 @@ Id пользователя: `JwtIssuer.GetUserId(ClaimsPrincipal) → ulong?` (
      cashpulse-network:
        external: true
    ```
+   `credit_calc_net` здесь — ключ сети внутри compose-файла; реальное имя docker-сети на сервере —
+   `credit_calc_credit_calc_net` (префикс compose-проекта `credit_calc_`), его видно в `docker network ls`.
+   `cashpulse-network` — внешняя сеть, её имя не префиксуется.
    Проверка после деплоя: `docker exec credit_calc_api getent hosts mvv42-auth` (если `getent` нет в образе —
    `docker network inspect cashpulse-network | grep credit_calc_api`).
 
