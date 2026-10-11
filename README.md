@@ -11,7 +11,7 @@
 
 | Что | Как |
 |---|---|
-| Публичный путь | nginx `location /auth/ { proxy_pass http://127.0.0.1:5010; }` — префикс не режется, сервис делает `UsePathBase("/auth")` |
+| Публичный путь | nginx (`mvv42-infra/nginx/apps/auth.conf`): `location ^~ /auth/ { proxy_pass http://127.0.0.1:5010; }` плюс три exact-location с `limit_req` (`location = /auth/api/telegram`, `= /auth/api/refresh`, `= /auth/api/invites/redeem`) — префикс не режется, сервис делает `UsePathBase("/auth")` |
 | Access | JWT ES256, 10 мин, `iss=https://mvv42.ru/auth`, `aud=mvv42`, claims `sub tg name adm apps`, `kid` = RFC 7638 thumbprint. Cookie `__Host-mvv42_at` (HttpOnly, Secure, SameSite=Strict, Path=/) |
 | Refresh | 32 случайных байта, в БД только SHA-256. Cookie `__Secure-mvv42_rt` (Path=/auth/api, Strict). Ротация на каждый refresh; повтор предыдущего токена < 30 с — гонка (только новый access), позже (или любой более старый токен из `refresh_token_history`) — отзыв семьи. Скользящие 30 дней, абсолютно 90 дней |
 | Ключи | PEM `es256-yyyyMMddHHmmss.pem` в `Auth__KeysPath` (volume). Первый генерируется при старте. Новый ключ сразу в JWKS, подписывает через 15 мин. Запись атомарная (`.tmp` → rename); нечитаемые, не P-256 и public-only файлы пропускаются с ошибкой в логе |
@@ -35,7 +35,6 @@
 | `Auth__KeysPath` | нет | `/var/lib/mvv42-auth/keys` |
 | `Auth__AllowedOrigins` | нет | `https://mvv42.ru` |
 | `Auth__SecureCookies` | нет | `true`; в `appsettings.Development.json` — `false` (cookie `mvv42_at`/`mvv42_rt` без префиксов и без Secure для http://localhost) |
-
 | `Auth__TrustedProxyCidrs` | нет | `172.16.0.0/12`; deploy пишет точный gateway сети: `172.18.0.1/32` (см. ниже) |
 | `Auth__RateLimitPerMinute` | нет | `30` — лимит на IP для `/telegram`, `/refresh`, `/invites/redeem` (за nginx `limit_req`) |
 
@@ -77,15 +76,18 @@ ssh на VDS: секреты пишутся в `/etc/mvv42/env/mvv42-auth.env` (
 `cashpulse-network`, `127.0.0.1:5010:8080`, volume `/var/lib/mvv42-auth/keys` (владелец uid 1654), health-check до 30 с,
 уведомление в Telegram при ошибке.
 
+**GHCR.** Job `image` пушит с `permissions: packages: write`; job `deploy` (`packages: read`) передаёт на сервер
+`GITHUB_TOKEN` и делает `docker login ghcr.io` во временный `DOCKER_CONFIG` перед `docker pull`, затем `docker logout`
+(тот же приём, что в `mvv42-infra` `deploy-dotnet-api.yml`). Поэтому пакет `ghcr.io/max31000/mvv42-auth` может
+оставаться приватным (пакет, созданный workflow этого репо, даёт ему доступ по умолчанию); можно и сделать его
+публичным, как `bonds-api`. Токен действует только пока идёт job.
+
 **Откат.** Перед заменой запоминается образ текущего контейнера (`docker inspect -f '{{.Config.Image}}' mvv42-auth`).
 Если новый контейнер не стал healthy за 30 с, он удаляется, а старый образ запускается с теми же аргументами
 (тот же env-файл, volume, порт); job всё равно падает. Первый деплой (старого контейнера нет) просто падает.
 Ручной откат на любую версию: перезапустить workflow на нужном коммите или
 `docker rm -f mvv42-auth && docker run … ghcr.io/max31000/mvv42-auth:sha-<commit>` с аргументами из `deploy.yml`.
 Миграции только добавляют таблицы (`IF NOT EXISTS`), поэтому старый образ работает с новой схемой.
-
-После перехода на новый путь env-файла старый `/etc/mvv42-auth/auth.env` больше не используется — удалить руками
-(`rm -r /etc/mvv42-auth`) после первого успешного деплоя.
 
 Секреты репозитория: `VDS_HOST`, `VDS_USER`, `VDS_SSH_KEY`, `AUTH_DB_CONNECTION_STRING`, `AUTH_TELEGRAM_BOT_TOKEN`,
 `AUTH_ADMIN_TELEGRAM_IDS`, `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (уведомления).
@@ -105,7 +107,7 @@ FLUSH PRIVILEGES;
 Тот же шаблон, что в `mvv42-infra/docs/server-layout.md` («New database in the shared MySQL») с `myapp` = `mvv42_auth`.
 Секрет `AUTH_DB_CONNECTION_STRING`: `Server=cashpulse-mysql;Port=3306;Database=mvv42_auth;User=mvv42_auth;Password=<generated>;`.
 
-Плюс nginx `location /auth/` (репо `mvv42-infra`, `nginx/apps/auth.conf`) и, если ещё не сделано, `/setdomain mvv42.ru` у бота в BotFather.
+Плюс nginx `location ^~ /auth/` и три rate-limited exact-location (репо `mvv42-infra`, `nginx/apps/auth.conf`) и, если ещё не сделано, `/setdomain mvv42.ru` у бота в BotFather.
 
 ### Ротация ключа подписи
 

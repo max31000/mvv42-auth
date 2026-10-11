@@ -62,10 +62,18 @@ public class AdminAndInviteTests(AuthAppFactory factory) : IClassFixture<AuthApp
     {
         var admin = await AdminAsync();
 
-        foreach (var bad in new[] { "auth", "api", "assets", "health", "portal", "Bad", "a.b" })
+        // Same rule as mvv42-infra (conventions.md, scripts/new-app.sh): ^[a-z][a-z0-9_-]{0,63}$.
+        var tooLong = "a" + new string('b', 64); // 65 chars
+        foreach (var bad in new[] { "auth", "api", "assets", "health", "portal", "Bad", "a.b", "1app", "_app", "-app", tooLong })
         {
             var r = await admin.PutAsJsonAsync($"/auth/api/admin/apps/{bad}", new { name = "x", anonymous = false, access = "public" });
             Assert.Equal(HttpStatusCode.BadRequest, r.StatusCode);
+        }
+
+        foreach (var good in new[] { "a", "my-app_2", "a" + new string('b', 63) })
+        {
+            var r = await admin.PutAsJsonAsync($"/auth/api/admin/apps/{good}", new { name = "x", anonymous = false, access = "public" });
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
         }
 
         var badAccess = await admin.PutAsJsonAsync("/auth/api/admin/apps/okapp", new { name = "x", anonymous = false, access = "everyone" });

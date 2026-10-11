@@ -128,7 +128,7 @@ invalid_refresh_token`. Повтор `/logout` безопасен (идемпо�
 | Метод | Путь | Тело / ответ |
 |---|---|---|
 | GET | `/auth/api/admin/apps` | список приложений |
-| PUT | `/auth/api/admin/apps/{id}` | `{name, anonymous, access}` → 200 app. `id`: `^[a-z0-9][a-z0-9_-]{0,63}$`, не из зарезервированных `auth, api, assets, health, .well-known, portal` |
+| PUT | `/auth/api/admin/apps/{id}` | `{name, anonymous, access}` → 200 app. `id`: `^[a-z][a-z0-9_-]{0,63}$`, не из зарезервированных `auth, api, assets, health, .well-known, portal` |
 | DELETE | `/auth/api/admin/apps/{id}` | 204 / 404 (гранты и инвайты удаляются каскадно) |
 | GET | `/auth/api/admin/users` | список пользователей (`isAdmin` — флаг в БД, без учёта env) |
 | PUT | `/auth/api/admin/users/{id}/admin` | `{isAdmin}` → 204 / 404 |

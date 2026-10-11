@@ -17,7 +17,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   IMAGE: ghcr.io/max31000/mvv42-auth
@@ -35,6 +34,9 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # push to GHCR
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -57,6 +59,9 @@ jobs:
   deploy:
     needs: image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read    # GITHUB_TOKEN used for docker login on the server (works for a private package)
     steps:
       - name: Run container on VDS
         uses: appleboy/ssh-action@v1
@@ -65,11 +70,13 @@ jobs:
           AUTH_TELEGRAM_BOT_TOKEN: ${{ secrets.AUTH_TELEGRAM_BOT_TOKEN }}
           AUTH_ADMIN_TELEGRAM_IDS: ${{ secrets.AUTH_ADMIN_TELEGRAM_IDS }}
           IMAGE_REF: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.VDS_HOST }}
           username: ${{ secrets.VDS_USER }}
           key: ${{ secrets.VDS_SSH_KEY }}
-          envs: AUTH_DB_CONNECTION_STRING,AUTH_TELEGRAM_BOT_TOKEN,AUTH_ADMIN_TELEGRAM_IDS,IMAGE_REF
+          envs: AUTH_DB_CONNECTION_STRING,AUTH_TELEGRAM_BOT_TOKEN,AUTH_ADMIN_TELEGRAM_IDS,IMAGE_REF,GHCR_USER,GHCR_TOKEN
           script: |
             set -eu
 
@@ -101,7 +108,13 @@ jobs:
             # Signing keys persist across deploys; the container runs as uid 1654 ("app" in aspnet:8.0).
             install -d -m 700 -o 1654 -g 1654 /var/lib/mvv42-auth/keys
 
-            docker pull "$IMAGE_REF"
+            # Pull with the job's GITHUB_TOKEN and a throw-away docker config (same as mvv42-infra
+            # deploy-dotnet-api.yml): works for a private GHCR package, leaves no stored login behind.
+            DOCKER_CONFIG="$(mktemp -d)"; export DOCKER_CONFIG
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin > /dev/null
+            docker pull -q "$IMAGE_REF" || { docker logout ghcr.io > /dev/null || true; rm -rf "$DOCKER_CONFIG"; exit 1; }
+            docker logout ghcr.io > /dev/null || true
+            rm -rf "$DOCKER_CONFIG"; unset DOCKER_CONFIG
 
             # Image the current container runs: the rollback target (empty on the very first deploy).
             OLD_IMAGE="$(docker inspect -f '{{.Config.Image}}' mvv42-auth 2>/dev/null || true)"

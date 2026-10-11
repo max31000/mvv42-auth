@@ -15,7 +15,7 @@ public static partial class AdminEndpoints
     public static readonly IReadOnlySet<string> ReservedAppIds =
         new HashSet<string>(StringComparer.Ordinal) { "auth", "api", "assets", "health", ".well-known", "portal" };
 
-    [GeneratedRegex("^[a-z0-9][a-z0-9_-]{0,63}$")]
+    [GeneratedRegex("^[a-z][a-z0-9_-]{0,63}$")]
     private static partial Regex AppIdPattern();
 
     public sealed record AppRequest(string? Name, bool Anonymous, string? Access);
