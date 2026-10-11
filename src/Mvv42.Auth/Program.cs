@@ -1,10 +1,22 @@
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Options;
+using Mvv42.Auth.Http.Endpoints;
+using Mvv42.Auth.Keys;
 using Mvv42.Auth.Options;
+using Mvv42.Auth.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));
 builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.Section));
+
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(sp =>
+{
+    var o = sp.GetRequiredService<IOptions<AuthOptions>>().Value;
+    return new SigningKeyStore(Path.GetFullPath(o.KeysPath), o.KeyActivationDelay, sp.GetRequiredService<TimeProvider>());
+});
+builder.Services.AddSingleton<AccessTokenIssuer>();
 
 // nginx terminates TLS and proxies /auth/ to 127.0.0.1:5010. Inside the container the peer is the
 // docker bridge gateway, not loopback, so the default KnownProxies would ignore X-Forwarded-*.
@@ -33,6 +45,7 @@ app.UseForwardedHeaders();
 app.UsePathBase("/auth");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapJwks();
 
 app.Run();
 
