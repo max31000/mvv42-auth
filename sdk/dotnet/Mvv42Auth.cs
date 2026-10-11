@@ -1,6 +1,9 @@
 // mvv42-auth SDK for .NET 8 apps — copy this single file into the app (e.g. src/<App>.Api/Auth/Mvv42Auth.cs).
 // Source of truth: https://github.com/max31000/mvv42-auth/blob/main/sdk/dotnet/Mvv42Auth.cs
-// Requires the package Microsoft.AspNetCore.Authentication.JwtBearer (8.0.x).
+// Requires the package Microsoft.AspNetCore.Authentication.JwtBearer (8.0.x, 8.0.11 recommended). All
+// Microsoft.IdentityModel.* / System.IdentityModel.Tokens.Jwt packages of the app must resolve to ONE version
+// (tested with 7.1.2, 7.6.3, 8.4.0): pin Microsoft.IdentityModel.Protocols.OpenIdConnect to the app's
+// System.IdentityModel.Tokens.Jwt version. Dual-mode policy: sdk/dotnet/README.md (never scheme-only).
 //
 //   builder.Services.AddMvv42Auth("bonds", o => builder.Configuration.GetSection("Mvv42Auth").Bind(o));
 //   app.UseAuthentication(); app.UseAuthorization();
@@ -161,6 +164,8 @@ public static class Mvv42Auth
                 if (unsafeMethod && request.Cookies.ContainsKey(options.CookieName) && !IsAllowedOrigin(request))
                 {
                     ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    ctx.Response.ContentType = "application/json";
+                    await ctx.Response.WriteAsync("{\"error\":\"origin_not_allowed\"}");
                     return;
                 }
                 await nextMiddleware(ctx);

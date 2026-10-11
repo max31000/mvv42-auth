@@ -119,7 +119,11 @@ public class DotnetSdkTests(AuthAppFactory auth) : IClassFixture<AuthAppFactory>
         var client = await AppAsync("cashpulse");
         var token = await AccessTokenAsync(AuthAppFactory.NewTelegramId());
 
-        Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(Request(HttpMethod.Post, "/api/action", token))).StatusCode);
+        var noOrigin = await client.SendAsync(Request(HttpMethod.Post, "/api/action", token));
+        Assert.Equal(HttpStatusCode.Forbidden, noOrigin.StatusCode);
+        // JSON like the auth service, so apps keep JSON error bodies
+        Assert.Equal("application/json", noOrigin.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("""{"error":"origin_not_allowed"}""", await noOrigin.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.Forbidden,
             (await client.SendAsync(Request(HttpMethod.Post, "/api/action", token, "https://evil.example"))).StatusCode);
         Assert.Equal(HttpStatusCode.OK,
