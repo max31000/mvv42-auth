@@ -102,6 +102,7 @@ app.UseForwardedHeaders();
 
 // nginx does not strip the prefix: /auth/api/... arrives as is (spec §9.8).
 app.UsePathBase("/auth");
+app.UseRouting(); // explicitly after UsePathBase so routes match the path without the prefix
 
 app.UseAuthentication();
 app.UseAuthorization();
