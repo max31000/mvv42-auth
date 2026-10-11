@@ -280,6 +280,9 @@ Id пользователя: `JwtIssuer.GetUserId(ClaimsPrincipal) → ulong?` (
 
 ### Ф2 — фронт
 
+> Общий шаг для каждого сервиса на Ф2: в `portal-shell/public/registry.json` добавить сервису `"auth": "shared"`.
+> До этого shell не ставит замок на плитку и не перехватывает логин (сервис логинит сам). Откат Ф2 — убрать флаг.
+
 - `sdk/web/mvv42.ts` → `src/lib/mvv42.ts`.
 - `src/api/client.ts`: `fetch` → `mvv42Fetch`, убрать `authHeaders()`; финальный 401 → `requestLogin('credit_calc')`
   вместо `logout()` + `location.href = …login`. `TRACKER_ENABLED` остаётся производным от `API_BASE`.
