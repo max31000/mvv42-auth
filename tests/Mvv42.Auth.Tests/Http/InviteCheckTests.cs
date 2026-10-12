@@ -131,6 +131,25 @@ public class InviteCheckTests(InviteAuthAppFactory factory) : IClassFixture<Invi
     public async Task MissingCode_400InvalidInviteFormat() =>
         await AssertCheckError(await Check(new { }), "invalid_invite_format");
 
+    [Theory]
+    [InlineData("application/json", "")]
+    [InlineData("application/json", "{")]
+    [InlineData("application/json", "not json")]
+    [InlineData("application/json", "[\"ABCD-EFGH-JKMN\"]")]
+    [InlineData("application/json", "\"ABCD-EFGH-JKMN\"")]
+    [InlineData("application/json", "{\"code\":123}")]
+    [InlineData("application/json", "{\"code\":null}")]
+    [InlineData("text/plain", "ABCD-EFGH-JKMN")]
+    public async Task MalformedBody_400InvalidInviteFormat_Journalled(string contentType, string body)
+    {
+        var before = (await Journal()).Count(e => e.Result == LoginResult.InviteCheckFailed);
+
+        var r = await Raw().PostAsync(Path, new StringContent(body, System.Text.Encoding.UTF8, contentType));
+
+        await AssertCheckError(r, "invalid_invite_format");
+        Assert.Equal(before + 1, (await Journal()).Count(e => e.Result == LoginResult.InviteCheckFailed));
+    }
+
     [Fact]
     public async Task UnknownCode_400InviteNotFound() =>
         await AssertCheckError(await Check(new { code = InviteCodes.Generate() }), "invite_not_found");
@@ -151,6 +170,15 @@ public class InviteCheckTests(InviteAuthAppFactory factory) : IClassFixture<Invi
 
         await AssertCheckError(await Check(new { code }), "invite_exhausted");
         Assert.Equal(1, await Uses(id));
+    }
+
+    [Fact]
+    public async Task ExpiredAndExhausted_400InviteExpired()
+    {
+        var (code, _) = await InviteAsync(App, maxUses: 1, uses: 1, expiresAt: DateTime.UtcNow.AddSeconds(2));
+        await Task.Delay(TimeSpan.FromSeconds(2.2));
+
+        await AssertCheckError(await Check(new { code }), "invite_expired");
     }
 
     [Fact]

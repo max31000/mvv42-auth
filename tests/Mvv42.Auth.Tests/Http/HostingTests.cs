@@ -126,18 +126,22 @@ public class HostingTests(AuthAppFactory factory) : IClassFixture<AuthAppFactory
     }
 
     [Fact]
-    public async Task InviteCheck_SharesThePerIpBudget()
+    public async Task InviteCheck_HasItsOwnPerIpBudget_SeparateFromLogin()
     {
         var limited = factory.WithWebHostBuilder(b => b.UseSetting("Auth:RateLimitPerMinute", "2"));
         var client = limited.CreateClient();
         client.DefaultRequestHeaders.Add("Origin", AuthAppFactory.Origin);
 
         Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/auth/api/invites/check", new { code = "x" })).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/auth/api/refresh", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/auth/api/invites/check", new { code = "x" })).StatusCode);
         var third = await client.PostAsJsonAsync("/auth/api/invites/check", new { code = "x" });
 
         Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
         Assert.Equal("rate_limited", (await third.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+        // the exhausted check budget does not touch /refresh, /telegram (and vice versa)
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/auth/api/refresh", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/auth/api/refresh", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await client.PostAsync("/auth/api/refresh", null)).StatusCode);
     }
 
     [Fact]

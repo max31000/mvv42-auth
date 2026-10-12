@@ -8,9 +8,10 @@
 Проверка — фильтр эндпоинта, т.е. выполняется **после** rate limit и авторизации: для эндпоинтов с
 `RequireAuthorization` запрос без access-cookie получит `401` раньше, чем `403 origin_not_allowed`.
 
-**Rate limit:** `/telegram`, `/refresh`, `/invites/redeem`, `/invites/check` — общее фиксированное окно 1 мин на IP клиента
+**Rate limit:** `/telegram`, `/refresh`, `/invites/redeem` — общее фиксированное окно 1 мин на IP клиента
 (`Auth__RateLimitPerMinute`, по умолчанию 30; IP берётся из `X-Forwarded-For` только от доверенного прокси,
-`Auth__TrustedProxyCidrs`) → `429 {"error":"rate_limited"}`. Перед сервисом ещё nginx `limit_req` (10 r/m, burst 10,
+`Auth__TrustedProxyCidrs`) → `429 {"error":"rate_limited"}`. У `/invites/check` — **своё** окно того же размера (политика
+`invite-check-per-ip`): перебор кодов не тратит лимит входа, и наоборот. Перед сервисом ещё nginx `limit_req` (10 r/m, burst 10,
 `429` без тела — HTML, клиент различает по статусу; у `/invites/check` своя зона `mvv42_invite_check`, не общая с
 `/telegram`/`/refresh`).
 
@@ -32,9 +33,9 @@
 | `invalid_refresh_token` | 401 | `/refresh`: нет cookie, неизвестный/истёкший/отозванный токен, reuse (семья отозвана), пользователь удалён или заблокирован; cookies удаляются |
 | `invite_not_found` | 400 | `/invites/redeem`: пустой, неизвестный или не прошедший нормализацию код |
 | `invite_expired` / `invite_exhausted` | 400 | `/invites/redeem`: срок истёк / использования кончились (если грант уже есть — это не ошибка, см. ниже) |
-| `invalid_invite_format` / `invite_not_found` / `invite_expired` / `invite_exhausted` | 400 | `/invites/check`: код не прошёл нормализацию / неизвестен / истёк / исчерпан |
+| `invalid_invite_format` / `invite_not_found` / `invite_expired` / `invite_exhausted` | 400 | `/invites/check`: тело/код не прошли разбор или нормализацию / неизвестен / истёк / исчерпан |
 | `origin_not_allowed` | 403 | любой небезопасный метод под `/auth/api/` с чужим `Origin` или без него |
-| `rate_limited` | 429 | `/telegram`, `/refresh`, `/invites/redeem`, `/invites/check` |
+| `rate_limited` | 429 | `/telegram`, `/refresh`, `/invites/redeem` (общее окно); `/invites/check` (своё окно) |
 | `invalid_app_id` / `invalid_name` / `invalid_access` | 400 | `PUT /admin/apps/{id}`; `invalid_app_id` также `POST /admin/invites` без поля `appId` или с не-строкой/не-`null` |
 | `unknown_user` / `unknown_app` | 400 | `POST /admin/grants`; `unknown_app` также `POST /admin/invites` (`appId` — `""` или нет такого приложения) |
 | `invalid_max_uses` / `invalid_expiry` | 400 | `POST /admin/invites` (`maxUses` 1…1000, `expiresInHours` 1…8760) |
@@ -177,10 +178,14 @@ invalid_refresh_token`. Повтор `/logout` безопасен (идемпо�
 ### `POST /auth/api/invites/check`
 Без аутентификации (OriginGuard — как у всех POST). Shell проверяет код **до** загрузки виджета Telegram (вход «сначала
 код»). `{ "code": "…" }` → `200 { "valid": true, "appId": "…" | null }` (`null` — инвайт «только вход»). Нормализация и
-поиск — те же, что при регистрации и redeem (см. «Инвайт-коды»), проверки в том же порядке: срок → использования.
+поиск — те же, что при регистрации и redeem (см. «Инвайт-коды»), проверки в том же порядке: срок → использования
+(истёкший и исчерпанный код → `invite_expired`). Тело разбирается вручную: пустое, не JSON, не объект, без строкового
+`code` или больше 4 КБ → `400 invalid_invite_format` (тоже журналируется), а не пустой 400 фреймворка.
 Использование **не** списывается; при успехе ничего не пишется ни в БД, ни в журнал. Каждый отказ пишет в
 `login_events` одну строку `result='invite_check_failed'`, в которой `userId`, `telegramId`, `ip`, `userAgent` = `null`
-(только время; ретенция 7 дней; счётчик в обзоре — `failedInviteChecks7d`). Cookies не ставятся.
+(только время; ретенция 7 дней; счётчик в обзоре — `failedInviteChecks7d`). Число таких строк ограничено лимитами nginx
+(`mvv42_invite_check`, 10 r/m + burst 10 на IP) и приложения (`invite-check-per-ip`) и чистится через 7 дней, так
+что поток неудачных проверок не раздувает журнал и не несёт данных о клиенте. Cookies не ставятся.
 
 | Ответ | Когда |
 |---|---|
@@ -190,7 +195,7 @@ invalid_refresh_token`. Повтор `/logout` безопасен (идемпо�
 | `400 invite_expired` | `expiresAt` прошёл |
 | `400 invite_exhausted` | `uses = maxUses` |
 | `403 origin_not_allowed` | чужой `Origin`/`Referer` или его нет |
-| `429 rate_limited` | общее app-окно на IP (см. Rate limit); nginx — своя зона `mvv42_invite_check`, `429` с HTML |
+| `429 rate_limited` | своё app-окно на IP (см. Rate limit); nginx — своя зона `mvv42_invite_check`, `429` с HTML |
 
 ### `POST /auth/api/invites/redeem`
 Нужен access-cookie любого залогиненного (не заблокированного) пользователя. `{ "code": "…" }` →

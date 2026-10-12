@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Mvv42.Auth.Access;
 using Mvv42.Auth.Data;
 using Mvv42.Auth.Invites;
@@ -8,13 +9,17 @@ public static class InviteEndpoints
 {
     public sealed record RedeemRequest(string? Code);
 
-    public sealed record CheckRequest(string? Code);
-
     /// <param name="AppId">The app the invite grants; null = login-only invite.</param>
     public sealed record CheckResponse(bool Valid, string? AppId);
 
     /// <summary><c>me</c> is the caller's <c>/me</c> payload after the grant; <c>appId</c> null = login-only invite.</summary>
     public sealed record RedeemResponse(string? AppId, bool AlreadyGranted, MeResponse Me);
+
+    /// <summary>Own per-IP window (same size as <see cref="AuthEndpoints.RateLimitPolicy"/>), not shared with login/refresh.</summary>
+    public const string CheckRateLimitPolicy = "invite-check-per-ip";
+
+    /// <summary>Upper bound for the check body; a code is a few dozen bytes.</summary>
+    private const int MaxCheckBodyBytes = 4096;
 
     private static IResult Bad(string error) => Results.Json(new { error }, statusCode: StatusCodes.Status400BadRequest);
 
@@ -26,7 +31,7 @@ public static class InviteEndpoints
     /// </summary>
     public static void MapInviteEndpoints(this RouteGroupBuilder api)
     {
-        api.MapPost("/invites/check", Check).RequireRateLimiting(AuthEndpoints.RateLimitPolicy);
+        api.MapPost("/invites/check", Check).RequireRateLimiting(CheckRateLimitPolicy);
         MapRedeem(api);
     }
 
@@ -35,14 +40,15 @@ public static class InviteEndpoints
     /// "code-first login"). 200 <c>{ valid: true, appId }</c>; 400 <c>invalid_invite_format</c> / <c>invite_not_found</c> /
     /// <c>invite_expired</c> / <c>invite_exhausted</c>. Same normalisation and lookup as registration and redeem, consumes
     /// nothing and stores nothing on success; a refusal writes one <c>invite_check_failed</c> journal row with only the time.
+    /// The body is parsed by hand: an empty, non-JSON or wrongly shaped body (no string <c>code</c>) is
+    /// <c>invalid_invite_format</c> like a malformed code, and journalled the same way.
     /// </summary>
-    private static async Task<IResult> Check(
-        CheckRequest? body, HttpContext ctx, IAuthStore store, TimeProvider time, InviteCodeHasher hasher)
+    private static async Task<IResult> Check(HttpContext ctx, IAuthStore store, TimeProvider time, InviteCodeHasher hasher)
     {
         var now = time.GetUtcNow().UtcDateTime;
         string? error;
         Invite? invite = null;
-        if (InviteCodes.Parse(body?.Code) is not { } code)
+        if (InviteCodes.Parse(await ReadCodeAsync(ctx.Request)) is not { } code)
             error = "invalid_invite_format";
         else if ((invite = await store.FindInviteAsync(hasher.Candidates(code))) is null)
             error = "invite_not_found";
@@ -55,6 +61,35 @@ public static class InviteEndpoints
 
         await AuthEndpoints.LogLoginAsync(ctx, store, time, LoginResult.InviteCheckFailed, null, null, withClient: false);
         return Bad(error);
+    }
+
+    /// <summary>The string <c>code</c> of a JSON object body; null for anything else (empty, too large, not JSON, other shape).</summary>
+    private static async Task<string?> ReadCodeAsync(HttpRequest request)
+    {
+        try
+        {
+            using var buffer = new MemoryStream();
+            var chunk = new byte[1024];
+            int read;
+            while ((read = await request.Body.ReadAsync(chunk, request.HttpContext.RequestAborted)) > 0)
+            {
+                if (buffer.Length + read > MaxCheckBodyBytes)
+                    return null;
+                buffer.Write(chunk, 0, read);
+            }
+            if (buffer.Length == 0)
+                return null;
+            using var json = JsonDocument.Parse(buffer.ToArray());
+            return json.RootElement.ValueKind == JsonValueKind.Object
+                && json.RootElement.TryGetProperty("code", out var value)
+                && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static void MapRedeem(RouteGroupBuilder api) =>

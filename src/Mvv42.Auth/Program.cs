@@ -37,8 +37,9 @@ builder.Services.AddOptions<ForwardedHeadersOptions>()
             o.KnownNetworks.Add(network);
     });
 
-// Defence in depth behind nginx limit_req: one fixed window per client IP shared by /telegram, /refresh,
-// /invites/redeem and /invites/check (the endpoints that verify secrets).
+// Defence in depth behind nginx limit_req: one fixed window per client IP shared by /telegram, /refresh and
+// /invites/redeem (the endpoints that verify secrets); the anonymous /invites/check gets its own window of the same
+// size, so probing codes does not eat the login budget (and vice versa).
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -48,6 +49,12 @@ builder.Services.AddRateLimiter(o =>
         return new ValueTask(ctx.HttpContext.Response.WriteAsync("""{"error":"rate_limited"}""", cancel));
     };
     o.AddPolicy(AuthEndpoints.RateLimitPolicy, ctx =>
+    {
+        var limit = ctx.RequestServices.GetRequiredService<IOptions<AuthOptions>>().Value.RateLimitPerMinute;
+        return RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            _ => new FixedWindowRateLimiterOptions { PermitLimit = limit, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 });
+    });
+    o.AddPolicy(InviteEndpoints.CheckRateLimitPolicy, ctx =>
     {
         var limit = ctx.RequestServices.GetRequiredService<IOptions<AuthOptions>>().Value.RateLimitPerMinute;
         return RateLimitPartition.GetFixedWindowLimiter(ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
