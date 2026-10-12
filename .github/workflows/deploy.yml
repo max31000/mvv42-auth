@@ -50,9 +50,9 @@ jobs:
           context: .
           file: src/Mvv42.Auth/Dockerfile
           push: true
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          # Only the immutable sha- tag (no latest): the server runs exactly this tag, so nothing (e.g. watchtower)
+          # can swap the container for another image behind CI's back.
+          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -123,11 +123,13 @@ jobs:
             OLD_IMAGE="$(docker inspect -f '{{.Config.Image}}' mvv42-auth 2>/dev/null || true)"
             echo "previous image: ${OLD_IMAGE:-<none>}"
 
-            # Identical arguments for the new and (on rollback) the old image.
+            # Identical arguments for the new and (on rollback) the old image. CI owns this container, watchtower
+            # must leave it alone (mvv42-infra round 2 contract).
             run_container() {
               docker run -d \
                 --name mvv42-auth \
                 --restart unless-stopped \
+                --label com.centurylinklabs.watchtower.enable=false \
                 --network "$NETWORK" \
                 -p 127.0.0.1:5010:8080 \
                 -v /var/lib/mvv42-auth/keys:/var/lib/mvv42-auth/keys \

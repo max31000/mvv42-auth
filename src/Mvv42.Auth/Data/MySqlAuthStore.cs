@@ -10,9 +10,12 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
     private readonly string _connectionString = Normalize(connectionString);
 
     private const string UserColumns =
-        "id, telegram_id, username, first_name, last_name, photo_url, is_admin, created_at, last_login_at";
+        "id, telegram_id, username, first_name, last_name, photo_url, is_admin, is_blocked, blocked_at, created_at, last_login_at";
     private const string SessionColumns =
-        "id, user_id, family_id, refresh_hash, prev_refresh_hash, rotated_at, created_at, expires_at, last_used_at, revoked_at, user_agent";
+        "id, user_id, family_id, refresh_hash, prev_refresh_hash, rotated_at, created_at, expires_at, last_used_at, revoked_at, user_agent, ip";
+    private const string LoginEventColumns =
+        "e.id, e.user_id, e.telegram_id, e.at, e.ip, e.user_agent, e.result, " +
+        "CASE WHEN TRIM(COALESCE(u.last_name, '')) = '' THEN u.first_name ELSE CONCAT(u.first_name, ' ', u.last_name) END AS user_name";
     private const string InviteColumns =
         "id, code_hash, app_id, max_uses, uses, expires_at, created_by, created_at";
 
@@ -28,10 +31,14 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
     /// <summary>
     /// Pins the connection semantics the store relies on, whatever the configured string says:
     /// <c>GuidFormat=None</c> — <c>family_id CHAR(36)</c> is read as a string (MySqlConnector's default would turn
-    /// every CHAR(36) into a <see cref="Guid"/>). Results do not depend on <c>UseAffectedRows</c>.
+    /// every CHAR(36) into a <see cref="Guid"/>); <c>DateTimeKind=Utc</c> — every DATETIME is UTC, so it is read back
+    /// as <see cref="DateTimeKind.Utc"/> and serialised with <c>Z</c>. Results do not depend on <c>UseAffectedRows</c>.
     /// </summary>
-    internal static string Normalize(string connectionString) =>
-        new MySqlConnectionStringBuilder(connectionString) { GuidFormat = MySqlGuidFormat.None }.ConnectionString;
+    internal static string Normalize(string connectionString) => new MySqlConnectionStringBuilder(connectionString)
+    {
+        GuidFormat = MySqlGuidFormat.None,
+        DateTimeKind = MySqlDateTimeKind.Utc,
+    }.ConnectionString;
 
     // ---- users
 
@@ -53,6 +60,25 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
     {
         await using var conn = await OpenAsync();
         return await conn.QuerySingleOrDefaultAsync<User>($"SELECT {UserColumns} FROM users WHERE id = @id", new { id });
+    }
+
+    public async Task<User?> GetUserByTelegramIdAsync(long telegramId)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.QuerySingleOrDefaultAsync<User>(
+            $"SELECT {UserColumns} FROM users WHERE telegram_id = @telegramId", new { telegramId });
+    }
+
+    public async Task<bool> SetUserBlockedAsync(long id, bool blocked, DateTime now)
+    {
+        await using var conn = await OpenAsync();
+        // Existence check instead of the affected-rows count, see SetUserAdminAsync.
+        await conn.ExecuteAsync("""
+            UPDATE users
+            SET is_blocked = @blocked, blocked_at = CASE WHEN @blocked THEN COALESCE(blocked_at, @now) ELSE NULL END
+            WHERE id = @id
+            """, new { id, blocked, now });
+        return await conn.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM users WHERE id = @id", new { id }) > 0;
     }
 
     public async Task<IReadOnlyList<User>> ListUsersAsync()
@@ -134,9 +160,9 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
         await using var conn = await OpenAsync();
         return await conn.ExecuteScalarAsync<long>("""
             INSERT INTO sessions (user_id, family_id, refresh_hash, prev_refresh_hash, rotated_at,
-                                  created_at, expires_at, last_used_at, revoked_at, user_agent)
+                                  created_at, expires_at, last_used_at, revoked_at, user_agent, ip)
             VALUES (@UserId, @FamilyId, @RefreshHash, @PrevRefreshHash, @RotatedAt,
-                    @CreatedAt, @ExpiresAt, @LastUsedAt, @RevokedAt, @UserAgent);
+                    @CreatedAt, @ExpiresAt, @LastUsedAt, @RevokedAt, @UserAgent, @Ip);
             SELECT LAST_INSERT_ID();
             """, s);
     }
@@ -200,6 +226,36 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
             "UPDATE sessions SET revoked_at = @now WHERE id = @id AND revoked_at IS NULL", new { id, now });
     }
 
+    public async Task<Session?> GetSessionAsync(long id)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.QuerySingleOrDefaultAsync<Session>($"SELECT {SessionColumns} FROM sessions WHERE id = @id", new { id });
+    }
+
+    public async Task<int> RevokeUserSessionsAsync(long userId, DateTime now)
+    {
+        await using var conn = await OpenAsync();
+        // revoked_at always changes from NULL, so the count is right under either affected-rows mode.
+        return await conn.ExecuteAsync(
+            "UPDATE sessions SET revoked_at = @now WHERE user_id = @userId AND revoked_at IS NULL", new { userId, now });
+    }
+
+    public async Task<IReadOnlyList<Session>> ListActiveSessionsAsync(long userId, DateTime now)
+    {
+        await using var conn = await OpenAsync();
+        return (await conn.QueryAsync<Session>(
+            $"SELECT {SessionColumns} FROM sessions WHERE user_id = @userId AND revoked_at IS NULL AND expires_at > @now ORDER BY id DESC",
+            new { userId, now })).AsList();
+    }
+
+    public async Task<IReadOnlyDictionary<long, int>> CountActiveSessionsAsync(DateTime now)
+    {
+        await using var conn = await OpenAsync();
+        var rows = await conn.QueryAsync<(long UserId, long Count)>(
+            "SELECT user_id, COUNT(*) FROM sessions WHERE revoked_at IS NULL AND expires_at > @now GROUP BY user_id", new { now });
+        return rows.ToDictionary(r => r.UserId, r => (int)r.Count);
+    }
+
     public async Task<int> DeleteStaleSessionsAsync(DateTime now, DateTime revokedBefore)
     {
         await using var conn = await OpenAsync();
@@ -226,13 +282,20 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
         return (await conn.QueryAsync<Invite>($"SELECT {InviteColumns} FROM invites ORDER BY id")).AsList();
     }
 
+    public async Task<Invite?> GetInviteByCodeHashAsync(string codeHash)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.QuerySingleOrDefaultAsync<Invite>(
+            $"SELECT {InviteColumns} FROM invites WHERE code_hash = @codeHash", new { codeHash });
+    }
+
     public async Task<bool> DeleteInviteAsync(long id)
     {
         await using var conn = await OpenAsync();
         return await conn.ExecuteAsync("DELETE FROM invites WHERE id = @id", new { id }) > 0;
     }
 
-    public async Task<string?> RedeemInviteAsync(string codeHash, long userId, DateTime now)
+    public async Task<InviteRedeemResult> RedeemInviteAsync(string codeHash, long userId, DateTime now)
     {
         await using var conn = await OpenAsync();
         await using var tx = await conn.BeginTransactionAsync();
@@ -241,22 +304,64 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
         var invite = await conn.QuerySingleOrDefaultAsync<Invite>(
             $"SELECT {InviteColumns} FROM invites WHERE code_hash = @codeHash FOR UPDATE", new { codeHash }, tx);
         if (invite is null)
-            return null;
+            return new InviteRedeemResult(InviteRedeemStatus.NotFound, null);
 
         var alreadyGranted = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM app_grants WHERE user_id = @userId AND app_id = @AppId",
             new { userId, invite.AppId }, tx) > 0;
         if (alreadyGranted)
-            return invite.AppId;
-
-        if (invite.Uses >= invite.MaxUses || invite.ExpiresAt <= now)
-            return null;
+            return new InviteRedeemResult(InviteRedeemStatus.AlreadyGranted, invite.AppId);
+        if (invite.ExpiresAt <= now)
+            return new InviteRedeemResult(InviteRedeemStatus.Expired, invite.AppId);
+        if (invite.Uses >= invite.MaxUses)
+            return new InviteRedeemResult(InviteRedeemStatus.Exhausted, invite.AppId);
 
         await conn.ExecuteAsync("UPDATE invites SET uses = uses + 1 WHERE id = @Id", new { invite.Id }, tx);
         await conn.ExecuteAsync(
             "INSERT IGNORE INTO app_grants (user_id, app_id, created_at) VALUES (@userId, @AppId, @now)",
             new { userId, invite.AppId, now }, tx);
         await tx.CommitAsync();
-        return invite.AppId;
+        return new InviteRedeemResult(InviteRedeemStatus.Granted, invite.AppId);
+    }
+
+    // ---- login events
+
+    public async Task<long> AddLoginEventAsync(LoginEvent e)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.ExecuteScalarAsync<long>("""
+            INSERT INTO login_events (user_id, telegram_id, at, ip, user_agent, result)
+            VALUES (@UserId, @TelegramId, @At, @Ip, @UserAgent, @Result);
+            SELECT LAST_INSERT_ID();
+            """, e);
+    }
+
+    public async Task<IReadOnlyList<LoginEvent>> ListLoginEventsAsync(long? userId, long? beforeId, int limit)
+    {
+        await using var conn = await OpenAsync();
+        // Whole journal: keyset by id (PK). One user: by time (ix_login_events_user_at), id breaks ties.
+        var order = userId is null ? "e.id DESC" : "e.at DESC, e.id DESC";
+        return (await conn.QueryAsync<LoginEvent>($"""
+            SELECT {LoginEventColumns}
+            FROM login_events e LEFT JOIN users u ON u.id = e.user_id
+            WHERE (@userId IS NULL OR e.user_id = @userId) AND (@beforeId IS NULL OR e.id < @beforeId)
+            ORDER BY {order}
+            LIMIT @limit
+            """, new { userId, beforeId, limit })).AsList();
+    }
+
+    public async Task<int> CountLoginEventsAsync(DateTime since, string result)
+    {
+        await using var conn = await OpenAsync();
+        return (int)await conn.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM login_events WHERE at >= @since AND result = @result", new { since, result });
+    }
+
+    public async Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff, params string[] results)
+    {
+        await using var conn = await OpenAsync();
+        return results.Length == 0
+            ? await conn.ExecuteAsync("DELETE FROM login_events WHERE at < @cutoff", new { cutoff })
+            : await conn.ExecuteAsync("DELETE FROM login_events WHERE at < @cutoff AND result IN @results", new { cutoff, results });
     }
 }

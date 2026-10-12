@@ -93,7 +93,7 @@ builder.Services.AddSingleton<UserAccessService>();
 builder.Services.AddSingleton<AuthCookies>();
 builder.Services.AddHostedService<SessionCleanupService>();
 
-// ---- authN/Z: the service validates its own access cookie (used by /invites/redeem and /admin/*).
+// ---- authN/Z: the service validates its own access cookie (used by /invites/redeem and /admin/*, policy owner).
 builder.Services.AddAuthentication(AuthEndpoints.Scheme).AddJwtBearer(AuthEndpoints.Scheme);
 builder.Services.AddOptions<JwtBearerOptions>(AuthEndpoints.Scheme)
     .Configure<IOptions<AuthOptions>, SigningKeyStore, AuthCookies>((o, auth, keys, cookies) =>
@@ -112,8 +112,9 @@ builder.Services.AddOptions<JwtBearerOptions>(AuthEndpoints.Scheme)
             },
         };
     });
+builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler, OwnerAuthorizationHandler>();
 builder.Services.AddAuthorizationBuilder()
-    .AddPolicy(AuthEndpoints.AdminPolicy, p => p.RequireAuthenticatedUser().RequireClaim("adm", "true"));
+    .AddPolicy(AuthEndpoints.OwnerPolicy, p => p.RequireAuthenticatedUser().AddRequirements(new OwnerRequirement()));
 
 var app = builder.Build();
 

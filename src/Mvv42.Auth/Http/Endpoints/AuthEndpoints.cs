@@ -12,7 +12,8 @@ public static class AuthEndpoints
 {
     /// <summary>JwtBearer scheme reading the access cookie (the service's own tokens).</summary>
     public const string Scheme = "mvv42";
-    public const string AdminPolicy = "admin";
+    /// <summary>Authenticated and the <c>tg</c> claim is in <c>Auth:AdminTelegramIds</c> (claim-based; all of /api/admin).</summary>
+    public const string OwnerPolicy = "owner";
     public const string RateLimitPolicy = "per-ip";
 
     /// <summary>Maps <c>/api/telegram|refresh|logout|me</c>; returns the <c>/api</c> group (OriginGuard applied).</summary>
@@ -31,7 +32,10 @@ public static class AuthEndpoints
 
     private static IResult Error(string code, int status) => Results.Json(new { error = code }, statusCode: status);
 
-    /// <summary>POST /api/telegram — raw Login Widget object → session, both cookies, /me payload.</summary>
+    /// <summary>
+    /// POST /api/telegram — raw Login Widget object → session, both cookies, /me payload. Every attempt that gets past
+    /// body parsing is written to <c>login_events</c>; a blocked user is refused before the profile is touched.
+    /// </summary>
     private static async Task<IResult> TelegramLogin(
         JsonElement body, HttpContext ctx, TelegramVerifier verifier, IAuthStore store, SessionService sessions,
         UserAccessService access, AuthCookies cookies, TimeProvider time, TelegramReplayCache replay)
@@ -43,21 +47,68 @@ public static class AuthEndpoints
         var check = verifier.Verify(fields, time.GetUtcNow());
         if (check.Error == TelegramVerifyError.NotConfigured)
             return Error("telegram_not_configured", StatusCodes.Status503ServiceUnavailable);
-        if (!check.Ok)
-            return Error(check.Error.ToString(), check.IsMalformed ? StatusCodes.Status400BadRequest : StatusCodes.Status401Unauthorized);
-        if (!replay.TryUse(fields["hash"]))
-            return Error("Replayed", StatusCodes.Status401Unauthorized);
 
-        var user = await store.UpsertUserAsync(TelegramAuthData.ToProfile(fields), time.GetUtcNow().UtcDateTime);
+        // The telegram id of a payload that failed verification (or was replayed) is unverified: never stored.
+        if (!check.Ok)
+        {
+            await LogLoginAsync(ctx, store, time, LoginResult.Invalid, null, null);
+            return Error(check.Error.ToString(), check.IsMalformed ? StatusCodes.Status400BadRequest : StatusCodes.Status401Unauthorized);
+        }
+        if (!replay.TryUse(fields["hash"]))
+        {
+            await LogLoginAsync(ctx, store, time, LoginResult.Replayed, null, null);
+            return Error("Replayed", StatusCodes.Status401Unauthorized);
+        }
+
+        var profile = TelegramAuthData.ToProfile(fields);
+        if (await store.GetUserByTelegramIdAsync(profile.TelegramId) is { } existing && access.IsEffectivelyBlocked(existing))
+            return await DenyBlockedAsync(ctx, store, time, existing.Id, existing.TelegramId);
+
+        var user = await store.UpsertUserAsync(profile, time.GetUtcNow().UtcDateTime);
 
         // A new login replaces whatever session this browser had.
         await sessions.RevokeAsync(cookies.ReadRefresh(ctx.Request));
-        var (session, refreshToken) = await sessions.CreateAsync(user.Id, ctx.Request.Headers.UserAgent.ToString());
+        var (session, refreshToken) = await sessions.CreateAsync(user.Id, ctx.Request.Headers.UserAgent.ToString(), ClientIp.Of(ctx));
 
-        var userAccess = (await access.GetAsync(user.Id))!;
+        var userAccess = await access.GetAsync(user.Id);
+        if (userAccess is null) // blocked in the meantime
+        {
+            await store.RevokeSessionAsync(session.Id, time.GetUtcNow().UtcDateTime);
+            return await DenyBlockedAsync(ctx, store, time, user.Id, user.TelegramId);
+        }
+
+        await LogLoginAsync(ctx, store, time, LoginResult.Ok, user.Id, user.TelegramId);
         cookies.SetAccess(ctx.Response, access.Issue(userAccess));
         cookies.SetRefresh(ctx.Response, refreshToken, session.ExpiresAt);
         return Results.Ok(UserAccessService.ToMe(userAccess));
+    }
+
+    private static async Task<IResult> DenyBlockedAsync(HttpContext ctx, IAuthStore store, TimeProvider time, long userId, long telegramId)
+    {
+        await LogLoginAsync(ctx, store, time, LoginResult.DeniedBlocked, userId, telegramId);
+        return Error("user_blocked", StatusCodes.Status403Forbidden);
+    }
+
+    /// <summary>Best effort: a journal failure is logged and never fails the login itself.</summary>
+    private static async Task LogLoginAsync(HttpContext ctx, IAuthStore store, TimeProvider time, string result, long? userId, long? telegramId)
+    {
+        try
+        {
+            await store.AddLoginEventAsync(new LoginEvent
+            {
+                UserId = userId,
+                TelegramId = telegramId,
+                At = time.GetUtcNow().UtcDateTime,
+                Ip = SessionService.Truncate(ClientIp.Of(ctx), 45),
+                UserAgent = SessionService.Truncate(ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua : null, 512),
+                Result = result,
+            });
+        }
+        catch (Exception ex)
+        {
+            ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(AuthEndpoints))
+                .LogWarning(ex, "Could not write the login event ({Result}, user {UserId})", result, userId);
+        }
     }
 
     /// <summary>POST /api/refresh — rotation (or access-only within the 30 s grace); 401 + cleared cookies otherwise.</summary>

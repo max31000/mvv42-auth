@@ -35,7 +35,7 @@ public sealed class SessionService(IAuthStore store, IOptions<AuthOptions> optio
 {
     private AuthOptions O => options.Value;
 
-    public async Task<(Session Session, string RefreshToken)> CreateAsync(long userId, string? userAgent)
+    public async Task<(Session Session, string RefreshToken)> CreateAsync(long userId, string? userAgent, string? ip = null)
     {
         var now = time.GetUtcNow().UtcDateTime;
         var token = NewToken();
@@ -47,7 +47,8 @@ public sealed class SessionService(IAuthStore store, IOptions<AuthOptions> optio
             CreatedAt = now,
             ExpiresAt = Min(now + O.RefreshTokenLifetime, now + O.SessionFamilyLifetime),
             LastUsedAt = now,
-            UserAgent = userAgent is { Length: > 512 } ? userAgent[..512] : userAgent,
+            UserAgent = Truncate(userAgent, 512),
+            Ip = Truncate(ip, 45),
         };
         var id = await store.CreateSessionAsync(session);
         return (session with { Id = id }, token);
@@ -117,6 +118,8 @@ public sealed class SessionService(IAuthStore store, IOptions<AuthOptions> optio
     public static string Hash(string token) => SecretTokens.Sha256Hex(token);
 
     private static string NewToken() => SecretTokens.New();
+
+    public static string? Truncate(string? value, int max) => value is { } v && v.Length > max ? v[..max] : value;
 
     private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
 }

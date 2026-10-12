@@ -214,10 +214,10 @@ public abstract class AuthStoreContractTests
         var first = await NewUser();
         var second = await NewUser();
 
-        Assert.Equal(app.Id, await Store.RedeemInviteAsync(invite.CodeHash, first.Id, T0));
+        Assert.Equal(new InviteRedeemResult(InviteRedeemStatus.Granted, app.Id), await Store.RedeemInviteAsync(invite.CodeHash, first.Id, T0));
         Assert.Equal([app.Id], await Store.GetGrantsAsync(first.Id));
 
-        Assert.Null(await Store.RedeemInviteAsync(invite.CodeHash, second.Id, T0));
+        Assert.Equal(new InviteRedeemResult(InviteRedeemStatus.Exhausted, app.Id), await Store.RedeemInviteAsync(invite.CodeHash, second.Id, T0));
         Assert.Empty(await Store.GetGrantsAsync(second.Id));
         Assert.Equal(1, (await Store.ListInvitesAsync()).Single(i => i.Id == invite.Id).Uses);
     }
@@ -229,18 +229,213 @@ public abstract class AuthStoreContractTests
         var user = await NewUser();
         await Store.AddGrantAsync(user.Id, app.Id, T0);
 
-        Assert.Equal(app.Id, await Store.RedeemInviteAsync(invite.CodeHash, user.Id, T0));
+        Assert.Equal(new InviteRedeemResult(InviteRedeemStatus.AlreadyGranted, app.Id), await Store.RedeemInviteAsync(invite.CodeHash, user.Id, T0));
         Assert.Equal(0, (await Store.ListInvitesAsync()).Single(i => i.Id == invite.Id).Uses);
     }
 
     [Fact]
-    public async Task RedeemInvite_ExpiredOrUnknown_ReturnsNull()
+    public async Task RedeemInvite_ExpiredOrUnknown()
     {
-        var (invite, _) = await NewInvite(expiresAt: T0.AddHours(1));
+        var (invite, app) = await NewInvite(expiresAt: T0.AddHours(1));
         var user = await NewUser();
 
-        Assert.Null(await Store.RedeemInviteAsync(invite.CodeHash, user.Id, T0.AddHours(1)));
-        Assert.Null(await Store.RedeemInviteAsync(Hash(), user.Id, T0));
+        Assert.Equal(new InviteRedeemResult(InviteRedeemStatus.Expired, app.Id), await Store.RedeemInviteAsync(invite.CodeHash, user.Id, T0.AddHours(1)));
+        Assert.Equal(new InviteRedeemResult(InviteRedeemStatus.NotFound, null), await Store.RedeemInviteAsync(Hash(), user.Id, T0));
+        Assert.Empty(await Store.GetGrantsAsync(user.Id));
+    }
+
+    // ---- admin extensions (migrations 003–006)
+
+    [Fact]
+    public async Task GetUserByTelegramId_FindsUser()
+    {
+        var user = await NewUser();
+        Assert.Equal(user.Id, (await Store.GetUserByTelegramIdAsync(user.TelegramId))!.Id);
+        Assert.Null(await Store.GetUserByTelegramIdAsync(UniqueTelegramId()));
+    }
+
+    [Fact]
+    public async Task SetUserBlocked_SetsFlagAndTime_UnblockClearsThem()
+    {
+        var user = await NewUser();
+        Assert.False(user.IsBlocked);
+        Assert.Null(user.BlockedAt);
+
+        Assert.True(await Store.SetUserBlockedAsync(user.Id, true, T0.AddMinutes(5)));
+        Assert.True(await Store.SetUserBlockedAsync(user.Id, true, T0.AddMinutes(9))); // unchanged → still found
+        var blocked = (await Store.GetUserAsync(user.Id))!;
+        Assert.True(blocked.IsBlocked);
+        Assert.Equal(T0.AddMinutes(5), blocked.BlockedAt); // first block time is kept
+        Assert.Contains(await Store.ListUsersAsync(), u => u.Id == user.Id && u.IsBlocked);
+
+        // a later login refreshes the profile but never unblocks
+        var relogin = await Store.UpsertUserAsync(new TelegramProfile(user.TelegramId, "Max", null, null, null), T0.AddHours(1));
+        Assert.True(relogin.IsBlocked);
+
+        Assert.True(await Store.SetUserBlockedAsync(user.Id, false, T0.AddMinutes(10)));
+        var unblocked = (await Store.GetUserAsync(user.Id))!;
+        Assert.False(unblocked.IsBlocked);
+        Assert.Null(unblocked.BlockedAt);
+
+        Assert.False(await Store.SetUserBlockedAsync(-1, true, T0));
+    }
+
+    [Fact]
+    public async Task ReadTimes_AreUtc()
+    {
+        var user = await NewUser();
+        var loaded = (await Store.GetUserAsync(user.Id))!;
+        Assert.Equal(DateTimeKind.Utc, loaded.CreatedAt.Kind);
+        Assert.Equal(DateTimeKind.Utc, loaded.LastLoginAt!.Value.Kind);
+    }
+
+    private async Task<Session> NewSessionFor(long userId, DateTime? expiresAt = null, string? ip = "203.0.113.7")
+    {
+        var session = new Session
+        {
+            UserId = userId,
+            FamilyId = Guid.NewGuid().ToString(),
+            RefreshHash = Hash(),
+            CreatedAt = T0,
+            ExpiresAt = expiresAt ?? T0.AddDays(30),
+            LastUsedAt = T0,
+            UserAgent = "test",
+            Ip = ip,
+        };
+        return session with { Id = await Store.CreateSessionAsync(session) };
+    }
+
+    [Fact]
+    public async Task Sessions_PerUser_ListCountRevokeAll()
+    {
+        var user = await NewUser();
+        var other = await NewUser();
+        var a = await NewSessionFor(user.Id);
+        var b = await NewSessionFor(user.Id, ip: null);
+        var expired = await NewSessionFor(user.Id, expiresAt: T0.AddMinutes(1));
+        var revoked = await NewSessionFor(user.Id);
+        await Store.RevokeSessionAsync(revoked.Id, T0);
+        var foreign = await NewSessionFor(other.Id);
+
+        var now = T0.AddHours(1);
+        var active = await Store.ListActiveSessionsAsync(user.Id, now);
+        Assert.Equal([b.Id, a.Id], active.Select(s => s.Id)); // newest first
+        Assert.Equal("203.0.113.7", active.Single(s => s.Id == a.Id).Ip);
+        Assert.Null(active.Single(s => s.Id == b.Id).Ip);
+
+        var counts = await Store.CountActiveSessionsAsync(now);
+        Assert.Equal(2, counts[user.Id]);
+        Assert.Equal(1, counts[other.Id]);
+
+        Assert.Equal(a.Id, (await Store.GetSessionAsync(a.Id))!.Id);
+        Assert.Equal(expired.UserId, (await Store.GetSessionAsync(expired.Id))!.UserId);
+        Assert.Null(await Store.GetSessionAsync(-1));
+
+        Assert.Equal(3, await Store.RevokeUserSessionsAsync(user.Id, now)); // a, b and the expired one
+        Assert.Empty(await Store.ListActiveSessionsAsync(user.Id, now));
+        Assert.False((await Store.CountActiveSessionsAsync(now)).ContainsKey(user.Id));
+        Assert.Equal(now, (await Store.GetSessionAsync(a.Id))!.RevokedAt);
+        Assert.Equal(T0, (await Store.GetSessionAsync(revoked.Id))!.RevokedAt); // already revoked: untouched
+        Assert.Null((await Store.GetSessionAsync(foreign.Id))!.RevokedAt);
+    }
+
+    private static LoginEvent Event(long? userId, long? tg, DateTime at, string result = LoginResult.Ok) =>
+        new() { UserId = userId, TelegramId = tg, At = at, Ip = "198.51.100.1", UserAgent = "ua", Result = result };
+
+    [Fact]
+    public async Task LoginEvents_AddList_PagesNewestFirst_FilterByUser()
+    {
+        var user = await NewUser();
+        var ids = new List<long>();
+        foreach (var result in new[] { LoginResult.Ok, LoginResult.DeniedBlocked, LoginResult.Ok })
+            ids.Add(await Store.AddLoginEventAsync(Event(user.Id, user.TelegramId, T0, result)));
+        var anonymous = await Store.AddLoginEventAsync(Event(null, null, T0, LoginResult.Invalid));
+
+        var mine = await Store.ListLoginEventsAsync(user.Id, beforeId: null, limit: 10);
+        Assert.Equal(ids.AsEnumerable().Reverse(), mine.Select(e => e.Id));
+        var first = mine.Last();
+        Assert.Equal((user.Id, user.TelegramId, T0, "198.51.100.1", "ua", LoginResult.Ok),
+            (first.UserId!.Value, first.TelegramId!.Value, first.At, first.Ip, first.UserAgent, first.Result));
+        Assert.Equal(LoginResult.DeniedBlocked, mine[1].Result);
+
+        var page = await Store.ListLoginEventsAsync(user.Id, beforeId: ids[2], limit: 1);
+        Assert.Equal([ids[1]], page.Select(e => e.Id));
+
+        var all = await Store.ListLoginEventsAsync(null, beforeId: anonymous + 1, limit: 2);
+        Assert.Equal([anonymous, ids[2]], all.Select(e => e.Id));
+        Assert.Null(all[0].UserId);
+        Assert.Null(all[0].TelegramId);
+        Assert.Equal(LoginResult.Invalid, all[0].Result);
+    }
+
+    [Fact]
+    public async Task LoginEvents_CountSince_OnlyGivenResult()
+    {
+        // A random far-future window: the MySQL contract shares one database between tests.
+        var since = new DateTime(3000, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddDays(Random.Shared.Next(0, 1_500_000));
+        await Store.AddLoginEventAsync(Event(null, null, since.AddMinutes(1)));
+        await Store.AddLoginEventAsync(Event(null, null, since.AddMinutes(2)));
+        await Store.AddLoginEventAsync(Event(null, null, since.AddMinutes(3), LoginResult.Invalid));
+        await Store.AddLoginEventAsync(Event(null, null, since.AddMinutes(-1)));
+
+        Assert.Equal(2, await Store.CountLoginEventsAsync(since, LoginResult.Ok));
+        Assert.Equal(1, await Store.CountLoginEventsAsync(since, LoginResult.Invalid));
+    }
+
+    [Fact]
+    public async Task LoginEvents_DeleteOlderThan()
+    {
+        var old = await Store.AddLoginEventAsync(Event(null, null, new DateTime(1990, 6, 1, 0, 0, 0, DateTimeKind.Utc)));
+        var kept = await Store.AddLoginEventAsync(Event(null, null, new DateTime(1991, 6, 1, 0, 0, 0, DateTimeKind.Utc)));
+
+        Assert.True(await Store.DeleteLoginEventsBeforeAsync(new DateTime(1991, 1, 1, 0, 0, 0, DateTimeKind.Utc)) >= 1);
+
+        var remaining = (await Store.ListLoginEventsAsync(null, beforeId: kept + 1, limit: 500)).Select(e => e.Id).ToList();
+        Assert.Contains(kept, remaining);
+        Assert.DoesNotContain(old, remaining);
+    }
+
+    [Fact]
+    public async Task LoginEvents_DeleteOlderThan_OnlyGivenResults()
+    {
+        var at = new DateTime(1985, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var invalid = await Store.AddLoginEventAsync(Event(null, null, at, LoginResult.Invalid));
+        var replayed = await Store.AddLoginEventAsync(Event(null, null, at, LoginResult.Replayed));
+        var ok = await Store.AddLoginEventAsync(Event(null, null, at));
+        var denied = await Store.AddLoginEventAsync(Event(null, null, at, LoginResult.DeniedBlocked));
+
+        Assert.True(await Store.DeleteLoginEventsBeforeAsync(at.AddDays(1), LoginResult.Invalid, LoginResult.Replayed) >= 2);
+
+        var remaining = (await Store.ListLoginEventsAsync(null, beforeId: denied + 1, limit: 500)).Select(e => e.Id).ToList();
+        Assert.Contains(ok, remaining);
+        Assert.Contains(denied, remaining);
+        Assert.DoesNotContain(invalid, remaining);
+        Assert.DoesNotContain(replayed, remaining);
+    }
+
+    [Fact]
+    public async Task LoginEvents_PerUser_NewestByTimeFirst_WithUserName()
+    {
+        var user = await NewUser(); // "Max" "V"
+        var middle = await Store.AddLoginEventAsync(Event(user.Id, user.TelegramId, T0.AddMinutes(1)));
+        var latest = await Store.AddLoginEventAsync(Event(user.Id, user.TelegramId, T0.AddMinutes(2)));
+        var earliest = await Store.AddLoginEventAsync(Event(user.Id, user.TelegramId, T0));
+
+        var mine = await Store.ListLoginEventsAsync(user.Id, beforeId: null, limit: 10);
+        Assert.Equal([latest, middle, earliest], mine.Select(e => e.Id));
+        Assert.All(mine, e => Assert.Equal("Max V", e.UserName));
+
+        var anonymous = await Store.AddLoginEventAsync(Event(null, null, T0, LoginResult.Invalid));
+        Assert.Null((await Store.ListLoginEventsAsync(null, beforeId: anonymous + 1, limit: 1)).Single().UserName);
+    }
+
+    [Fact]
+    public async Task GetInviteByCodeHash_FindsInvite()
+    {
+        var (invite, app) = await NewInvite(maxUses: 3);
+        var found = await Store.GetInviteByCodeHashAsync(invite.CodeHash);
+        Assert.Equal((invite.Id, app.Id, 3, 0), (found!.Id, found.AppId, found.MaxUses, found.Uses));
+        Assert.Null(await Store.GetInviteByCodeHashAsync(Hash()));
     }
 
     [Fact]
@@ -255,5 +450,21 @@ public abstract class AuthStoreContractTests
 
 public class InMemoryAuthStoreTests : AuthStoreContractTests
 {
-    protected override IAuthStore Store { get; } = new InMemoryAuthStore();
+    private readonly InMemoryAuthStore _store = new();
+
+    protected override IAuthStore Store => _store;
+
+    /// <summary>Same as the MySQL foreign keys (ON DELETE SET NULL on both columns).</summary>
+    [Fact]
+    public async Task DeleteUser_NullsUserAndTelegramIdInLoginEvents()
+    {
+        var user = await _store.UpsertUserAsync(new TelegramProfile(4242, "Max", null, null, null), T0);
+        var id = await _store.AddLoginEventAsync(new LoginEvent { UserId = user.Id, TelegramId = 4242, At = T0 });
+
+        _store.DeleteUser(user.Id);
+
+        var e = (await _store.ListLoginEventsAsync(null, null, 10)).Single(x => x.Id == id);
+        Assert.Null(e.UserId);
+        Assert.Null(e.TelegramId);
+    }
 }

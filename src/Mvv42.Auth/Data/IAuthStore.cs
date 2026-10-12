@@ -8,8 +8,14 @@ public interface IAuthStore
     /// <summary>Creates the user on first login or refreshes the profile; sets last_login_at.</summary>
     Task<User> UpsertUserAsync(TelegramProfile profile, DateTime now);
     Task<User?> GetUserAsync(long id);
+    Task<User?> GetUserByTelegramIdAsync(long telegramId);
     Task<IReadOnlyList<User>> ListUsersAsync();
     Task<bool> SetUserAdminAsync(long id, bool isAdmin);
+    /// <summary>
+    /// Block: <c>is_blocked</c> = 1 and <c>blocked_at</c> = <paramref name="now"/> (kept if already blocked);
+    /// unblock clears both. Sessions are not touched (see <see cref="RevokeUserSessionsAsync"/>). false = no such user.
+    /// </summary>
+    Task<bool> SetUserBlockedAsync(long id, bool blocked, DateTime now);
 
     // Apps
     Task<IReadOnlyList<App>> GetAppsAsync();
@@ -38,6 +44,13 @@ public interface IAuthStore
     Task<RefreshHistoryEntry?> GetRefreshHistoryAsync(string refreshHash);
     Task RevokeFamilyAsync(string familyId, DateTime now);
     Task RevokeSessionAsync(long id, DateTime now);
+    Task<Session?> GetSessionAsync(long id);
+    /// <summary>Revokes every not yet revoked session of the user; returns how many were revoked.</summary>
+    Task<int> RevokeUserSessionsAsync(long userId, DateTime now);
+    /// <summary>Not revoked and not expired at <paramref name="now"/>, newest first.</summary>
+    Task<IReadOnlyList<Session>> ListActiveSessionsAsync(long userId, DateTime now);
+    /// <summary>Active session count per user (users without active sessions are absent).</summary>
+    Task<IReadOnlyDictionary<long, int>> CountActiveSessionsAsync(DateTime now);
     /// <summary>
     /// Deletes sessions expired before <paramref name="now"/> or revoked before <paramref name="revokedBefore"/>,
     /// together with their refresh-token history.
@@ -47,10 +60,22 @@ public interface IAuthStore
     // Invites
     Task<long> CreateInviteAsync(Invite invite);
     Task<IReadOnlyList<Invite>> ListInvitesAsync();
+    Task<Invite?> GetInviteByCodeHashAsync(string codeHash);
     Task<bool> DeleteInviteAsync(long id);
     /// <summary>
-    /// Atomically: valid (not expired, uses &lt; max_uses) → uses+1 and grant; returns the app id.
-    /// A user who already has the grant gets the app id back without consuming a use. Invalid → null.
+    /// Atomically: valid (not expired, uses &lt; max_uses) → uses+1 and grant (<see cref="InviteRedeemStatus.Granted"/>).
+    /// A user who already has the grant gets <see cref="InviteRedeemStatus.AlreadyGranted"/> without consuming a use.
     /// </summary>
-    Task<string?> RedeemInviteAsync(string codeHash, long userId, DateTime now);
+    Task<InviteRedeemResult> RedeemInviteAsync(string codeHash, long userId, DateTime now);
+
+    // Login events
+    Task<long> AddLoginEventAsync(LoginEvent loginEvent);
+    /// <summary>
+    /// Newest first with <see cref="LoginEvent.UserName"/> filled: the whole journal by id (keyset paging,
+    /// <paramref name="beforeId"/> = exclusive upper bound); one user's events by time, then id.
+    /// </summary>
+    Task<IReadOnlyList<LoginEvent>> ListLoginEventsAsync(long? userId, long? beforeId, int limit);
+    Task<int> CountLoginEventsAsync(DateTime since, string result);
+    /// <summary>Deletes events older than <paramref name="cutoff"/>; only with the given results when any are given.</summary>
+    Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff, params string[] results);
 }

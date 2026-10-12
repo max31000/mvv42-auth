@@ -1,3 +1,8 @@
+// DEPRECATED: use `@mvv42/kit/platform` (https://github.com/max31000/mvv42-kit) instead — same functions
+// (getMe, refreshSession, mvv42Fetch, requestLogin, logout, onShellMessage) plus React hooks, ApiError and the
+// shell bridge. This copy-in file keeps working for existing apps but gets no new features; do not use it in
+// new code.
+//
 // mvv42-auth web SDK — copy this single file into an app frontend (e.g. src/lib/mvv42.ts).
 // Source of truth: https://github.com/max31000/mvv42-auth/blob/main/sdk/web/mvv42.ts
 // No dependencies. Works in any framework; see sdk/web/README section in docs/migration.md.
@@ -28,6 +33,8 @@ export interface Mvv42User {
   username: string | null;
   photoUrl: string | null;
   isAdmin: boolean;
+  /** Telegram id in Auth__AdminTelegramIds: may use the admin API (optional: absent on older servers). */
+  isOwner?: boolean;
 }
 
 export interface Me {

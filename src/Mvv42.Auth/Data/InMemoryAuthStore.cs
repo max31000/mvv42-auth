@@ -20,6 +20,7 @@ public sealed class InMemoryAuthStore : IAuthStore
     private readonly List<Session> _sessions = [];
     private readonly List<RefreshHistoryEntry> _history = [];
     private readonly List<Invite> _invites = [];
+    private readonly List<LoginEvent> _loginEvents = [];
     private long _nextId = 1;
 
     private T Locked<T>(Func<T> action)
@@ -52,10 +53,24 @@ public sealed class InMemoryAuthStore : IAuthStore
         _history.RemoveAll(h => sessions.Contains(h.SessionId));
         _sessions.RemoveAll(s => s.UserId == id);
         _grants.RemoveAll(g => g.UserId == id);
+        for (var i = 0; i < _loginEvents.Count; i++) // ON DELETE SET NULL in MySQL
+            if (_loginEvents[i].UserId == id)
+                _loginEvents[i] = _loginEvents[i] with { UserId = null, TelegramId = null };
         return _users.RemoveAll(u => u.Id == id);
     });
 
     public Task<User?> GetUserAsync(long id) => Run(() => _users.FirstOrDefault(u => u.Id == id));
+
+    public Task<User?> GetUserByTelegramIdAsync(long telegramId) => Run(() => _users.FirstOrDefault(u => u.TelegramId == telegramId));
+
+    public Task<bool> SetUserBlockedAsync(long id, bool blocked, DateTime now) => Run(() =>
+    {
+        var index = _users.FindIndex(u => u.Id == id);
+        if (index < 0) return false;
+        var user = _users[index];
+        _users[index] = user with { IsBlocked = blocked, BlockedAt = blocked ? user.BlockedAt ?? now : null };
+        return true;
+    });
 
     public Task<IReadOnlyList<User>> ListUsersAsync() => Run(() => (IReadOnlyList<User>)_users.OrderBy(u => u.Id).ToList());
 
@@ -140,13 +155,31 @@ public sealed class InMemoryAuthStore : IAuthStore
 
     public Task RevokeSessionAsync(long id, DateTime now) => Run(() => Revoke(s => s.Id == id, now));
 
-    private bool Revoke(Predicate<Session> match, DateTime now)
+    private int Revoke(Predicate<Session> match, DateTime now)
     {
+        var count = 0;
         for (var i = 0; i < _sessions.Count; i++)
+        {
             if (match(_sessions[i]) && _sessions[i].RevokedAt is null)
+            {
                 _sessions[i] = _sessions[i] with { RevokedAt = now };
-        return true;
+                count++;
+            }
+        }
+        return count;
     }
+
+    public Task<Session?> GetSessionAsync(long id) => Run(() => _sessions.FirstOrDefault(s => s.Id == id));
+
+    public Task<int> RevokeUserSessionsAsync(long userId, DateTime now) => Run(() => Revoke(s => s.UserId == userId, now));
+
+    private static bool IsActive(Session s, DateTime now) => s.RevokedAt is null && s.ExpiresAt > now;
+
+    public Task<IReadOnlyList<Session>> ListActiveSessionsAsync(long userId, DateTime now) => Run(() =>
+        (IReadOnlyList<Session>)_sessions.Where(s => s.UserId == userId && IsActive(s, now)).OrderByDescending(s => s.Id).ToList());
+
+    public Task<IReadOnlyDictionary<long, int>> CountActiveSessionsAsync(DateTime now) => Run(() =>
+        (IReadOnlyDictionary<long, int>)_sessions.Where(s => IsActive(s, now)).GroupBy(s => s.UserId).ToDictionary(g => g.Key, g => g.Count()));
 
     public Task<int> DeleteStaleSessionsAsync(DateTime now, DateTime revokedBefore) => Run(() =>
     {
@@ -164,18 +197,47 @@ public sealed class InMemoryAuthStore : IAuthStore
 
     public Task<IReadOnlyList<Invite>> ListInvitesAsync() => Run(() => (IReadOnlyList<Invite>)_invites.ToList());
 
+    public Task<Invite?> GetInviteByCodeHashAsync(string codeHash) => Run(() => _invites.FirstOrDefault(i => i.CodeHash == codeHash));
+
     public Task<bool> DeleteInviteAsync(long id) => Run(() => _invites.RemoveAll(i => i.Id == id) > 0);
 
-    public Task<string?> RedeemInviteAsync(string codeHash, long userId, DateTime now) => Run(() =>
+    public Task<InviteRedeemResult> RedeemInviteAsync(string codeHash, long userId, DateTime now) => Run(() =>
     {
         var index = _invites.FindIndex(i => i.CodeHash == codeHash);
-        if (index < 0) return null;
+        if (index < 0) return new InviteRedeemResult(InviteRedeemStatus.NotFound, null);
         var invite = _invites[index];
-        if (_grants.Any(g => g.UserId == userId && g.AppId == invite.AppId)) return invite.AppId;
-        if (invite.Uses >= invite.MaxUses || invite.ExpiresAt <= now) return null;
+        if (_grants.Any(g => g.UserId == userId && g.AppId == invite.AppId))
+            return new InviteRedeemResult(InviteRedeemStatus.AlreadyGranted, invite.AppId);
+        if (invite.ExpiresAt <= now) return new InviteRedeemResult(InviteRedeemStatus.Expired, invite.AppId);
+        if (invite.Uses >= invite.MaxUses) return new InviteRedeemResult(InviteRedeemStatus.Exhausted, invite.AppId);
 
         _invites[index] = invite with { Uses = invite.Uses + 1 };
         AddGrant(userId, invite.AppId, now);
-        return (string?)invite.AppId;
+        return new InviteRedeemResult(InviteRedeemStatus.Granted, invite.AppId);
     });
+
+    public Task<long> AddLoginEventAsync(LoginEvent loginEvent) => Run(() =>
+    {
+        var id = _nextId++;
+        _loginEvents.Add(loginEvent with { Id = id });
+        return id;
+    });
+
+    public Task<IReadOnlyList<LoginEvent>> ListLoginEventsAsync(long? userId, long? beforeId, int limit) => Run(() =>
+    {
+        var rows = _loginEvents.Where(e => (userId is null || e.UserId == userId) && (beforeId is null || e.Id < beforeId));
+        var ordered = userId is null
+            ? rows.OrderByDescending(e => e.Id)
+            : rows.OrderByDescending(e => e.At).ThenByDescending(e => e.Id);
+        return (IReadOnlyList<LoginEvent>)ordered
+            .Take(limit)
+            .Select(e => e with { UserName = _users.FirstOrDefault(u => u.Id == e.UserId)?.DisplayName })
+            .ToList();
+    });
+
+    public Task<int> CountLoginEventsAsync(DateTime since, string result) =>
+        Run(() => _loginEvents.Count(e => e.At >= since && e.Result == result));
+
+    public Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff, params string[] results) =>
+        Run(() => _loginEvents.RemoveAll(e => e.At < cutoff && (results.Length == 0 || results.Contains(e.Result))));
 }

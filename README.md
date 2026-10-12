@@ -5,7 +5,7 @@
 
 - Спека: `mvv42-infra/docs/specs/2026-10-11-platform-design.md` (§4 и §9).
 - API: [`docs/api.md`](docs/api.md). Перевод приложений: [`docs/migration.md`](docs/migration.md).
-- SDK (copy-in файлы): [`sdk/dotnet/Mvv42Auth.cs`](sdk/dotnet/README.md), [`sdk/web/mvv42.ts`](sdk/web/mvv42.ts).
+- SDK (copy-in файлы): [`sdk/dotnet/Mvv42Auth.cs`](sdk/dotnet/README.md), [`sdk/web/mvv42.ts`](sdk/web/mvv42.ts) (**deprecated** — для фронтов `@mvv42/kit/platform`, репо `max31000/mvv42-kit`).
 
 ## Как устроено
 
@@ -70,10 +70,10 @@ dotnet run --project src/Mvv42.Auth           # http://localhost:5010/auth/healt
 
 ## Деплой
 
-`.github/workflows/deploy.yml` на push в `main` (job `deploy` выключен, пока repo variable `AUTH_DEPLOY_ENABLED` ≠ `true` — включить после bootstrap БД и секретов: `gh variable set AUTH_DEPLOY_ENABLED -b true -R max31000/mvv42-auth`): тесты → образ `ghcr.io/max31000/mvv42-auth:{latest,sha-…}` →
+`.github/workflows/deploy.yml` на push в `main` (job `deploy` выключен, пока repo variable `AUTH_DEPLOY_ENABLED` ≠ `true` — включить после bootstrap БД и секретов: `gh variable set AUTH_DEPLOY_ENABLED -b true -R max31000/mvv42-auth`): тесты → образ `ghcr.io/max31000/mvv42-auth:sha-…` (только sha-тег, без `latest`) →
 ssh на VDS: секреты пишутся в `/etc/mvv42/env/mvv42-auth.env` (каталог 700, файл 600 — конвенция `mvv42-infra`
 `docs/conventions.md`), `Auth__TrustedProxyCidrs` = gateway `cashpulse-network`/32, контейнер `mvv42-auth` в сети
-`cashpulse-network`, `127.0.0.1:5010:8080`, volume `/var/lib/mvv42-auth/keys` (владелец uid 1654), health-check до 30 с,
+`cashpulse-network` с меткой `com.centurylinklabs.watchtower.enable=false` (watchtower его не трогает), `127.0.0.1:5010:8080`, volume `/var/lib/mvv42-auth/keys` (владелец uid 1654), health-check до 30 с,
 уведомление в Telegram при ошибке.
 
 **GHCR.** Job `image` пушит с `permissions: packages: write`; job `deploy` (`packages: read`) передаёт на сервер
