@@ -55,7 +55,7 @@ public sealed class InMemoryAuthStore : IAuthStore
         _grants.RemoveAll(g => g.UserId == id);
         for (var i = 0; i < _loginEvents.Count; i++) // ON DELETE SET NULL in MySQL
             if (_loginEvents[i].UserId == id)
-                _loginEvents[i] = _loginEvents[i] with { UserId = null };
+                _loginEvents[i] = _loginEvents[i] with { UserId = null, TelegramId = null };
         return _users.RemoveAll(u => u.Id == id);
     });
 
@@ -197,6 +197,8 @@ public sealed class InMemoryAuthStore : IAuthStore
 
     public Task<IReadOnlyList<Invite>> ListInvitesAsync() => Run(() => (IReadOnlyList<Invite>)_invites.ToList());
 
+    public Task<Invite?> GetInviteByCodeHashAsync(string codeHash) => Run(() => _invites.FirstOrDefault(i => i.CodeHash == codeHash));
+
     public Task<bool> DeleteInviteAsync(long id) => Run(() => _invites.RemoveAll(i => i.Id == id) > 0);
 
     public Task<InviteRedeemResult> RedeemInviteAsync(string codeHash, long userId, DateTime now) => Run(() =>
@@ -222,14 +224,20 @@ public sealed class InMemoryAuthStore : IAuthStore
     });
 
     public Task<IReadOnlyList<LoginEvent>> ListLoginEventsAsync(long? userId, long? beforeId, int limit) => Run(() =>
-        (IReadOnlyList<LoginEvent>)_loginEvents
-            .Where(e => (userId is null || e.UserId == userId) && (beforeId is null || e.Id < beforeId))
-            .OrderByDescending(e => e.Id)
+    {
+        var rows = _loginEvents.Where(e => (userId is null || e.UserId == userId) && (beforeId is null || e.Id < beforeId));
+        var ordered = userId is null
+            ? rows.OrderByDescending(e => e.Id)
+            : rows.OrderByDescending(e => e.At).ThenByDescending(e => e.Id);
+        return (IReadOnlyList<LoginEvent>)ordered
             .Take(limit)
-            .ToList());
+            .Select(e => e with { UserName = _users.FirstOrDefault(u => u.Id == e.UserId)?.DisplayName })
+            .ToList();
+    });
 
     public Task<int> CountLoginEventsAsync(DateTime since, string result) =>
         Run(() => _loginEvents.Count(e => e.At >= since && e.Result == result));
 
-    public Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff) => Run(() => _loginEvents.RemoveAll(e => e.At < cutoff));
+    public Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff, params string[] results) =>
+        Run(() => _loginEvents.RemoveAll(e => e.At < cutoff && (results.Length == 0 || results.Contains(e.Result))));
 }

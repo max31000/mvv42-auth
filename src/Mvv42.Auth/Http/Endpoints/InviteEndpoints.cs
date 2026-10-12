@@ -24,13 +24,23 @@ public static class InviteEndpoints
         {
             // Blocked or deleted callers do not get to consume an invite.
             var userId = ctx.User.CurrentUserId()!.Value;
-            if (await access.GetAsync(userId) is null)
+            if (await access.GetAsync(userId) is not { } callerAccess)
                 return Results.Unauthorized();
 
             if (string.IsNullOrWhiteSpace(body.Code))
                 return Bad("invite_not_found");
 
-            var result = await store.RedeemInviteAsync(SecretTokens.Sha256Hex(body.Code.Trim()), userId, time.GetUtcNow().UtcDateTime);
+            var codeHash = SecretTokens.Sha256Hex(body.Code.Trim());
+
+            // The policy already lets the caller use the app (admin/owner, public app, existing grant): nothing to
+            // grant, so no use is consumed, whatever state the invite is in.
+            if (await store.GetInviteByCodeHashAsync(codeHash) is { } invite && callerAccess.AllowedApps.Contains(invite.AppId))
+            {
+                cookies.SetAccess(ctx.Response, access.Issue(callerAccess));
+                return Results.Ok(new RedeemResponse(invite.AppId, AlreadyGranted: true, UserAccessService.ToMe(callerAccess)));
+            }
+
+            var result = await store.RedeemInviteAsync(codeHash, userId, time.GetUtcNow().UtcDateTime);
             switch (result.Status)
             {
                 case InviteRedeemStatus.NotFound: return Bad("invite_not_found");

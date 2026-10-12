@@ -120,6 +120,9 @@ public sealed record LoginEvent
     public string? Ip { get; init; }
     public string? UserAgent { get; init; }
     public string Result { get; init; } = LoginResult.Ok;
+
+    /// <summary>Display name of <see cref="UserId"/>, filled by <see cref="IAuthStore.ListLoginEventsAsync"/> (not stored).</summary>
+    public string? UserName { get; init; }
 }
 
 public enum InviteRedeemStatus

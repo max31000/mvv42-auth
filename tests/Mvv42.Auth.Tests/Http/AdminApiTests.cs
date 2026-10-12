@@ -1,11 +1,13 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Routing.Patterns;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
 using Mvv42.Auth.Data;
 using Mvv42.Auth.Sessions;
@@ -203,15 +205,74 @@ public class AdminApiTests(AuthAppFactory factory) : IClassFixture<AuthAppFactor
     }
 
     [Fact]
-    public async Task BlockedOwnerToken_AdminApi_401()
+    public async Task Owner_FlaggedBlockedInDb_IsNeverTreatedAsBlocked()
     {
-        // Not reachable through the API (cannot_block_owner); guards the UserAccessService choke point.
+        // Not reachable through the API (cannot_block_owner), e.g. a row blocked before its id went into the env.
         using var isolated = new AuthAppFactory();
         var owner = isolated.CreateBrowser();
         var ownerId = (await Json(await AuthAppFactory.LoginAsync(owner, AuthAppFactory.AdminTelegramId))).GetProperty("user").GetProperty("id").GetInt64();
         await isolated.Services.GetRequiredService<IAuthStore>().SetUserBlockedAsync(ownerId, true, DateTime.UtcNow);
 
-        Assert.Equal(HttpStatusCode.Unauthorized, (await owner.GetAsync("/auth/api/admin/users")).StatusCode);
+        Assert.Equal(ownerId, (await Json(await owner.GetAsync("/auth/api/me"))).GetProperty("user").GetProperty("id").GetInt64());
+        Assert.Equal(HttpStatusCode.OK, (await owner.GetAsync("/auth/api/admin/users")).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await owner.PostAsync("/auth/api/refresh", null)).StatusCode);
+        await AuthAppFactory.LoginAsync(owner, AuthAppFactory.AdminTelegramId);
+    }
+
+    [Fact]
+    public async Task Owner_AdminFlag_CannotBeChanged()
+    {
+        var owner = await OwnerAsync();
+        var ownerId = (await Json(await owner.GetAsync("/auth/api/me"))).GetProperty("user").GetProperty("id").GetInt64();
+        foreach (var value in new[] { false, true })
+            await AssertError(await owner.PutAsJsonAsync($"/auth/api/admin/users/{ownerId}/admin", new { isAdmin = value }),
+                HttpStatusCode.BadRequest, "cannot_change_owner");
+        Assert.False((await Store.GetUserAsync(ownerId))!.IsAdmin); // DB flag untouched
+    }
+
+    [Fact]
+    public async Task Logins_InvalidBefore_400()
+    {
+        var owner = await OwnerAsync();
+        foreach (var bad in new[] { "x", "-1", "1.5" })
+            await AssertError(await owner.GetAsync($"/auth/api/admin/logins?before={bad}"), HttpStatusCode.BadRequest, "invalid_before");
+        Assert.Equal(HttpStatusCode.OK, (await owner.GetAsync("/auth/api/admin/logins?before=5")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Redeem_AppAlreadyAllowedByPolicy_AlreadyGranted_WithoutConsumingUse()
+    {
+        var owner = await OwnerAsync();
+        await owner.PutAsJsonAsync("/auth/api/admin/apps/policy_app", new { name = "P", anonymous = false, access = "invite" });
+        var invite = await Json(await owner.PostAsJsonAsync("/auth/api/admin/invites", new { appId = "policy_app", maxUses = 1 }));
+        var publicInvite = await Json(await owner.PostAsJsonAsync("/auth/api/admin/invites", new { appId = "cashpulse", maxUses = 1 }));
+
+        // owner (admin) already may use every app; a regular user already may use a public app
+        var ownerRedeem = await Json(await owner.PostAsJsonAsync("/auth/api/invites/redeem", new { code = invite.GetProperty("code").GetString() }));
+        Assert.True(ownerRedeem.GetProperty("alreadyGranted").GetBoolean());
+        var (user, _, _) = await UserAsync();
+        var userRedeem = await Json(await user.PostAsJsonAsync("/auth/api/invites/redeem", new { code = publicInvite.GetProperty("code").GetString() }));
+        Assert.True(userRedeem.GetProperty("alreadyGranted").GetBoolean());
+        Assert.Equal("cashpulse", userRedeem.GetProperty("appId").GetString());
+
+        var invites = (await Json(await owner.GetAsync("/auth/api/admin/invites"))).EnumerateArray().ToList();
+        foreach (var id in new[] { invite.GetProperty("id").GetInt64(), publicInvite.GetProperty("id").GetInt64() })
+            Assert.Equal(0, invites.Single(i => i.GetProperty("id").GetInt64() == id).GetProperty("uses").GetInt32());
+    }
+
+    [Fact]
+    public async Task LoginJournalFailure_NeverFailsALogin()
+    {
+        using var broken = factory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
+            s.AddSingleton(FailingJournalStore.Wrap(new InMemoryAuthStore()))));
+        var client = broken.CreateClient();
+        client.DefaultRequestHeaders.Add("Origin", AuthAppFactory.Origin);
+        var tg = AuthAppFactory.NewTelegramId();
+
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/auth/api/telegram", AuthAppFactory.WidgetJson(AuthAppFactory.WidgetData(tg)))).StatusCode);
+        var forged = AuthAppFactory.WidgetData(tg);
+        forged["first_name"] = "Mallory";
+        await AssertError(await client.PostAsync("/auth/api/telegram", AuthAppFactory.WidgetJson(forged)), HttpStatusCode.Unauthorized, "InvalidHash");
     }
 
     [Fact]
@@ -393,5 +454,33 @@ public class AdminApiTests(AuthAppFactory factory) : IClassFixture<AuthAppFactor
 
         Assert.Equal(HttpStatusCode.NoContent, (await owner.DeleteAsync($"/auth/api/admin/invites/{activeId}")).StatusCode);
         await AssertError(await owner.DeleteAsync($"/auth/api/admin/invites/{activeId}"), HttpStatusCode.NotFound, "invite_not_found");
+    }
+}
+
+/// <summary>An <see cref="IAuthStore"/> whose login journal is down (every other call goes to the inner store).</summary>
+public class FailingJournalStore : DispatchProxy
+{
+    private IAuthStore _inner = null!;
+
+    public static IAuthStore Wrap(IAuthStore inner)
+    {
+        var proxy = Create<IAuthStore, FailingJournalStore>();
+        ((FailingJournalStore)(object)proxy)._inner = inner;
+        return proxy;
+    }
+
+    protected override object? Invoke(MethodInfo? method, object?[]? args)
+    {
+        if (method!.Name == nameof(IAuthStore.AddLoginEventAsync))
+            return Task.FromException<long>(new InvalidOperationException("login journal is down"));
+        try
+        {
+            return method.Invoke(_inner, args);
+        }
+        catch (TargetInvocationException e) when (e.InnerException is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(e.InnerException);
+            throw;
+        }
     }
 }

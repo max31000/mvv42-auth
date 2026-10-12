@@ -37,7 +37,8 @@
 | `cannot_block_owner` | 400 | `PUT /admin/users/{id}/blocked` с `blocked: true` для владельца |
 | `session_not_found` | 404 | `DELETE /admin/sessions/{id}` |
 | `invite_not_found` | 404 | `DELETE /admin/invites/{id}` |
-| `invalid_limit` | 400 | `GET /admin/logins`: `limit` не целое 1…500 |
+| `cannot_change_owner` | 400 | `PUT /admin/users/{id}/admin` для владельца (его `isAdmin` эффективный и неизменяемый) |
+| `invalid_limit` / `invalid_before` | 400 | `GET /admin/logins`: `limit` не целое 1…500 / `before` не неотрицательное целое |
 
 ## Cookies
 
@@ -82,7 +83,8 @@ access-JWT заблокированного пользователя прини�
 `FromFuture`), `replayed`. Для `invalid`/`replayed` `telegramId` и `userId` **не сохраняются** (id не проверен).
 Плюс IP (после `X-Forwarded-For` от доверенного прокси; IPv4-mapped IPv6 `::ffff:a.b.c.d` пишется как `a.b.c.d`) и
 User-Agent. Тот же IP пишется в `sessions.ip`. `invalid_body` и `telegram_not_configured` не журналируются.
-Записи старше 180 дней удаляет часовая фоновая очистка.
+Часовая фоновая очистка удаляет `invalid`/`replayed` старше 7 дней, остальные — старше 180 дней. Запись в журнал —
+best effort: её сбой логируется и **не** ломает вход.
 
 ### `POST /auth/api/refresh`
 По refresh-cookie. `204` + новый access + новый refresh (ротация). Если предъявлен **предыдущий** refresh-токен,
@@ -127,8 +129,8 @@ invalid_refresh_token`. Повтор `/logout` безопасен (идемпо�
 ### `POST /auth/api/invites/redeem`
 Нужен access-cookie любого залогиненного (не заблокированного) пользователя. `{ "code": "…" }` →
 `200 { "appId": "…", "alreadyGranted": false, "me": <тело как у /me> }` и **сразу переизданный** access-cookie.
-Если грант уже есть — `200` с `alreadyGranted: true`, использование не списывается (даже если инвайт уже истёк или
-исчерпан). Shell строит ссылку `https://mvv42.ru/?invite=<code>`.
+Если пользователь **уже** может пользоваться приложением (явный грант, `public`-приложение, админ/владелец) — `200` с
+`alreadyGranted: true`, использование не списывается (даже если инвайт уже истёк или исчерпан). Shell строит ссылку `https://mvv42.ru/?invite=<code>`.
 
 | Ответ | Когда |
 |---|---|
@@ -149,9 +151,10 @@ invalid_refresh_token`. Повтор `/logout` безопасен (идемпо�
 ## Admin API (`/auth/api/admin`, политика `owner`)
 
 **Доступ:** access-cookie, в котором claim `tg` входит в `Auth__AdminTelegramIds` (владелец). Иначе `401` (нет/истёк
-cookie, пользователь удалён или заблокирован) / `403` (не владелец — `users.is_admin` **не** даёт доступа к админке, он
-только открывает `access=admin`-приложения). Проверка по claim'у; заблокированный токена не получает, а владельца
-заблокировать нельзя.
+cookie, пользователь удалён) / `403` **с пустым телом** (не владелец — `users.is_admin` **не** даёт доступа к админке,
+он только открывает `access=admin`-приложения). Проверка по claim'у; заблокированный токена не получает. Владельца
+заблокировать нельзя, а флаг `is_blocked` в его строке (если он стоит) игнорируется — владелец никогда не считается
+заблокированным.
 
 После любого изменяющего запроса вызывающему переиздаётся access-cookie (его собственные права применяются сразу).
 Права **других** пользователей (гранты, `isAdmin`, режим приложения, блокировка) доходят до их приложений с их следующим
@@ -171,7 +174,8 @@ type AdminSession = { id: number; createdAt: string; lastUsedAt: string | null; 
 type LoginEvent = { id: number; at: string; userId: number | null; telegramId: number | null; userName: string | null;
   ip: string | null; userAgent: string | null; result: 'ok' | 'denied_blocked' | 'invalid' | 'replayed' };
 type AdminApp = { id: string; name: string; anonymous: boolean; access: 'public' | 'invite' | 'admin' };
-type AdminInvite = { id: number; appId: string; maxUses: number; uses: number; expiresAt: string;
+type AdminInvite = { id: number; appId: string; maxUses: number; uses: number;
+  expiresAt: string | null;    // API всегда ставит срок; null — только у строк, созданных вручную (такой не истекает)
   createdBy: number | null; createdAt: string;
   status: 'active' | 'expired' | 'exhausted' };   // exhausted важнее expired
 ```
@@ -182,12 +186,12 @@ type AdminInvite = { id: number; appId: string; maxUses: number; uses: number; e
 |---|---|
 | `GET /overview` | `{ users, activeSessions, logins24h, logins7d, blocked, apps: (AdminApp & { grantedUsers })[] }`. `logins*` — входы с `result=ok` за 24 ч / 7 дней; `grantedUsers` — сколько незаблокированных пользователей имеют доступ к приложению (как `granted` в `/me`: `public` — все, `invite` — по гранту + админы, `admin` — админы) |
 | `GET /users` | `AdminUser[]` (по `id`) |
-| `GET /users/{id}` | `{ user: AdminUser, sessions: AdminSession[], logins: LoginEvent[] }` — активные сессии (новые первыми), последние 50 входов · 404 `user_not_found` |
-| `PUT /users/{id}/admin` | `{ isAdmin }` → 204 · 404 `user_not_found` |
+| `GET /users/{id}` | `{ user: AdminUser, sessions: AdminSession[], logins: LoginEvent[] }` — активные сессии (новые первыми), последние 50 входов (по времени, новые первыми) · 404 `user_not_found` |
+| `PUT /users/{id}/admin` | `{ isAdmin }` → 204 · 404 `user_not_found` · 400 `cannot_change_owner` |
 | `PUT /users/{id}/blocked` | `{ blocked }` → 204 · 404 `user_not_found` · 400 `cannot_block_owner`. Блокировка ставит `blockedAt` и **отзывает все сессии**; разблокировка сессии не возвращает (нужен новый вход) |
 | `POST /users/{id}/revoke-sessions` | → 204 · 404 `user_not_found` |
 | `DELETE /sessions/{id}` | → 204 (повтор для уже отозванной — тоже 204) · 404 `session_not_found` |
-| `GET /logins?limit=1..500&before=<id>` | `{ items: LoginEvent[], nextBefore: number \| null }` — новые первыми (по `id`), `limit` по умолчанию 100; следующая страница — `before=nextBefore`; `nextBefore: null` — дальше нет · 400 `invalid_limit` |
+| `GET /logins?limit=1..500&before=<id>` | `{ items: LoginEvent[], nextBefore: number \| null }` — новые первыми (по `id`), `limit` по умолчанию 100; следующая страница — `before=nextBefore`; `nextBefore: null` — дальше нет · 400 `invalid_limit` / `invalid_before` |
 | `GET /apps` | `AdminApp[]` |
 | `PUT /apps/{id}` | `{ name, anonymous, access }` → 200 `AdminApp`. `id`: `^[a-z][a-z0-9_-]{0,63}$`, не из зарезервированных `auth, api, assets, health, .well-known, portal, admin` · 400 `invalid_app_id` / `invalid_name` / `invalid_access` |
 | `DELETE /apps/{id}` | → 204 / 404 (пустое тело; гранты и инвайты удаляются каскадно) |
@@ -205,6 +209,7 @@ type AdminInvite = { id: number; appId: string; maxUses: number; uses: number; e
 Повторное предъявление *предыдущего* токена различается по `rotated_at` (grace 30 с / reuse). Хеш, который есть только в
 истории (старше предыдущего), — всегда reuse, отзыв семьи.
 Фоновая служба раз в час удаляет истёкшие сессии и отозванные более суток назад вместе с их историей (FK `ON DELETE CASCADE`),
-а также записи `login_events` старше 180 дней. В `sessions.ip` — IP клиента при входе (нормализованный, см. журнал входов).
+а также записи `login_events` старше 180 дней (`invalid`/`replayed` — старше 7 дней). При удалении пользователя из БД
+`login_events.user_id` и `telegram_id` его записей обнуляются (два FK `ON DELETE SET NULL`). В `sessions.ip` — IP клиента при входе (нормализованный, см. журнал входов).
 Блокировка: `users.is_blocked`/`blocked_at`; единая точка проверки — выдача токена (`/telegram`, `/refresh`, неявный refresh
 в `/me`, переиздание cookie после redeem/admin), заблокированному токен не выдаётся.

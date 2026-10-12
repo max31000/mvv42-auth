@@ -61,8 +61,8 @@ public static class AuthEndpoints
         }
 
         var profile = TelegramAuthData.ToProfile(fields);
-        if (await store.GetUserByTelegramIdAsync(profile.TelegramId) is { IsBlocked: true } blocked)
-            return await DenyBlockedAsync(ctx, store, time, blocked.Id, blocked.TelegramId);
+        if (await store.GetUserByTelegramIdAsync(profile.TelegramId) is { } existing && access.IsEffectivelyBlocked(existing))
+            return await DenyBlockedAsync(ctx, store, time, existing.Id, existing.TelegramId);
 
         var user = await store.UpsertUserAsync(profile, time.GetUtcNow().UtcDateTime);
 
@@ -89,16 +89,27 @@ public static class AuthEndpoints
         return Error("user_blocked", StatusCodes.Status403Forbidden);
     }
 
-    private static Task LogLoginAsync(HttpContext ctx, IAuthStore store, TimeProvider time, string result, long? userId, long? telegramId) =>
-        store.AddLoginEventAsync(new LoginEvent
+    /// <summary>Best effort: a journal failure is logged and never fails the login itself.</summary>
+    private static async Task LogLoginAsync(HttpContext ctx, IAuthStore store, TimeProvider time, string result, long? userId, long? telegramId)
+    {
+        try
         {
-            UserId = userId,
-            TelegramId = telegramId,
-            At = time.GetUtcNow().UtcDateTime,
-            Ip = SessionService.Truncate(ClientIp.Of(ctx), 45),
-            UserAgent = SessionService.Truncate(ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua : null, 512),
-            Result = result,
-        });
+            await store.AddLoginEventAsync(new LoginEvent
+            {
+                UserId = userId,
+                TelegramId = telegramId,
+                At = time.GetUtcNow().UtcDateTime,
+                Ip = SessionService.Truncate(ClientIp.Of(ctx), 45),
+                UserAgent = SessionService.Truncate(ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua : null, 512),
+                Result = result,
+            });
+        }
+        catch (Exception ex)
+        {
+            ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(AuthEndpoints))
+                .LogWarning(ex, "Could not write the login event ({Result}, user {UserId})", result, userId);
+        }
+    }
 
     /// <summary>POST /api/refresh — rotation (or access-only within the 30 s grace); 401 + cleared cookies otherwise.</summary>
     private static async Task<IResult> Refresh(HttpContext ctx, SessionService sessions, UserAccessService access, AuthCookies cookies) =>

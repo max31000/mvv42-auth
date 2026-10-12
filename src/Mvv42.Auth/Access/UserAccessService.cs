@@ -27,7 +27,7 @@ public sealed class UserAccessService(IAuthStore store, AccessTokenIssuer issuer
     public async Task<UserAccess?> GetAsync(long userId)
     {
         var user = await store.GetUserAsync(userId);
-        if (user is null || user.IsBlocked)
+        if (user is null || IsEffectivelyBlocked(user))
             return null;
 
         var apps = await store.GetAppsAsync();
@@ -35,6 +35,9 @@ public sealed class UserAccessService(IAuthStore store, AccessTokenIssuer issuer
         var allowed = AccessPolicy.AllowedApps(isAdmin, apps, await store.GetGrantsAsync(userId));
         return new UserAccess(user, isAdmin, IsOwner(user.TelegramId), apps, allowed.ToHashSet(StringComparer.Ordinal));
     }
+
+    /// <summary>Owners are never treated as blocked, whatever the row says (they cannot be locked out by a stale flag).</summary>
+    public bool IsEffectivelyBlocked(User user) => user.IsBlocked && !IsOwner(user.TelegramId);
 
     public IssuedAccessToken Issue(UserAccess access) => issuer.Issue(new AccessTokenSubject(
         access.User.Id, access.User.TelegramId, access.User.DisplayName, access.IsAdmin,

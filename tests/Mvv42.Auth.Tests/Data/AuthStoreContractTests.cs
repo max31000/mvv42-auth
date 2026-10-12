@@ -396,6 +396,49 @@ public abstract class AuthStoreContractTests
     }
 
     [Fact]
+    public async Task LoginEvents_DeleteOlderThan_OnlyGivenResults()
+    {
+        var at = new DateTime(1985, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var invalid = await Store.AddLoginEventAsync(Event(null, null, at, LoginResult.Invalid));
+        var replayed = await Store.AddLoginEventAsync(Event(null, null, at, LoginResult.Replayed));
+        var ok = await Store.AddLoginEventAsync(Event(null, null, at));
+        var denied = await Store.AddLoginEventAsync(Event(null, null, at, LoginResult.DeniedBlocked));
+
+        Assert.True(await Store.DeleteLoginEventsBeforeAsync(at.AddDays(1), LoginResult.Invalid, LoginResult.Replayed) >= 2);
+
+        var remaining = (await Store.ListLoginEventsAsync(null, beforeId: denied + 1, limit: 500)).Select(e => e.Id).ToList();
+        Assert.Contains(ok, remaining);
+        Assert.Contains(denied, remaining);
+        Assert.DoesNotContain(invalid, remaining);
+        Assert.DoesNotContain(replayed, remaining);
+    }
+
+    [Fact]
+    public async Task LoginEvents_PerUser_NewestByTimeFirst_WithUserName()
+    {
+        var user = await NewUser(); // "Max" "V"
+        var middle = await Store.AddLoginEventAsync(Event(user.Id, user.TelegramId, T0.AddMinutes(1)));
+        var latest = await Store.AddLoginEventAsync(Event(user.Id, user.TelegramId, T0.AddMinutes(2)));
+        var earliest = await Store.AddLoginEventAsync(Event(user.Id, user.TelegramId, T0));
+
+        var mine = await Store.ListLoginEventsAsync(user.Id, beforeId: null, limit: 10);
+        Assert.Equal([latest, middle, earliest], mine.Select(e => e.Id));
+        Assert.All(mine, e => Assert.Equal("Max V", e.UserName));
+
+        var anonymous = await Store.AddLoginEventAsync(Event(null, null, T0, LoginResult.Invalid));
+        Assert.Null((await Store.ListLoginEventsAsync(null, beforeId: anonymous + 1, limit: 1)).Single().UserName);
+    }
+
+    [Fact]
+    public async Task GetInviteByCodeHash_FindsInvite()
+    {
+        var (invite, app) = await NewInvite(maxUses: 3);
+        var found = await Store.GetInviteByCodeHashAsync(invite.CodeHash);
+        Assert.Equal((invite.Id, app.Id, 3, 0), (found!.Id, found.AppId, found.MaxUses, found.Uses));
+        Assert.Null(await Store.GetInviteByCodeHashAsync(Hash()));
+    }
+
+    [Fact]
     public async Task DeleteInvite_RemovesIt()
     {
         var (invite, _) = await NewInvite();
@@ -407,5 +450,21 @@ public abstract class AuthStoreContractTests
 
 public class InMemoryAuthStoreTests : AuthStoreContractTests
 {
-    protected override IAuthStore Store { get; } = new InMemoryAuthStore();
+    private readonly InMemoryAuthStore _store = new();
+
+    protected override IAuthStore Store => _store;
+
+    /// <summary>Same as the MySQL foreign keys (ON DELETE SET NULL on both columns).</summary>
+    [Fact]
+    public async Task DeleteUser_NullsUserAndTelegramIdInLoginEvents()
+    {
+        var user = await _store.UpsertUserAsync(new TelegramProfile(4242, "Max", null, null, null), T0);
+        var id = await _store.AddLoginEventAsync(new LoginEvent { UserId = user.Id, TelegramId = 4242, At = T0 });
+
+        _store.DeleteUser(user.Id);
+
+        var e = (await _store.ListLoginEventsAsync(null, null, 10)).Single(x => x.Id == id);
+        Assert.Null(e.UserId);
+        Assert.Null(e.TelegramId);
+    }
 }

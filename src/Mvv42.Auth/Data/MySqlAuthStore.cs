@@ -13,7 +13,9 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
         "id, telegram_id, username, first_name, last_name, photo_url, is_admin, is_blocked, blocked_at, created_at, last_login_at";
     private const string SessionColumns =
         "id, user_id, family_id, refresh_hash, prev_refresh_hash, rotated_at, created_at, expires_at, last_used_at, revoked_at, user_agent, ip";
-    private const string LoginEventColumns = "id, user_id, telegram_id, at, ip, user_agent, result";
+    private const string LoginEventColumns =
+        "e.id, e.user_id, e.telegram_id, e.at, e.ip, e.user_agent, e.result, " +
+        "CASE WHEN TRIM(COALESCE(u.last_name, '')) = '' THEN u.first_name ELSE CONCAT(u.first_name, ' ', u.last_name) END AS user_name";
     private const string InviteColumns =
         "id, code_hash, app_id, max_uses, uses, expires_at, created_by, created_at";
 
@@ -280,6 +282,13 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
         return (await conn.QueryAsync<Invite>($"SELECT {InviteColumns} FROM invites ORDER BY id")).AsList();
     }
 
+    public async Task<Invite?> GetInviteByCodeHashAsync(string codeHash)
+    {
+        await using var conn = await OpenAsync();
+        return await conn.QuerySingleOrDefaultAsync<Invite>(
+            $"SELECT {InviteColumns} FROM invites WHERE code_hash = @codeHash", new { codeHash });
+    }
+
     public async Task<bool> DeleteInviteAsync(long id)
     {
         await using var conn = await OpenAsync();
@@ -330,10 +339,13 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
     public async Task<IReadOnlyList<LoginEvent>> ListLoginEventsAsync(long? userId, long? beforeId, int limit)
     {
         await using var conn = await OpenAsync();
+        // Whole journal: keyset by id (PK). One user: by time (ix_login_events_user_at), id breaks ties.
+        var order = userId is null ? "e.id DESC" : "e.at DESC, e.id DESC";
         return (await conn.QueryAsync<LoginEvent>($"""
-            SELECT {LoginEventColumns} FROM login_events
-            WHERE (@userId IS NULL OR user_id = @userId) AND (@beforeId IS NULL OR id < @beforeId)
-            ORDER BY id DESC
+            SELECT {LoginEventColumns}
+            FROM login_events e LEFT JOIN users u ON u.id = e.user_id
+            WHERE (@userId IS NULL OR e.user_id = @userId) AND (@beforeId IS NULL OR e.id < @beforeId)
+            ORDER BY {order}
             LIMIT @limit
             """, new { userId, beforeId, limit })).AsList();
     }
@@ -345,9 +357,11 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
             "SELECT COUNT(*) FROM login_events WHERE at >= @since AND result = @result", new { since, result });
     }
 
-    public async Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff)
+    public async Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff, params string[] results)
     {
         await using var conn = await OpenAsync();
-        return await conn.ExecuteAsync("DELETE FROM login_events WHERE at < @cutoff", new { cutoff });
+        return results.Length == 0
+            ? await conn.ExecuteAsync("DELETE FROM login_events WHERE at < @cutoff", new { cutoff })
+            : await conn.ExecuteAsync("DELETE FROM login_events WHERE at < @cutoff AND result IN @results", new { cutoff, results });
     }
 }

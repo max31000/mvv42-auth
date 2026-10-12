@@ -87,15 +87,21 @@ public static partial class AdminEndpoints
 
             var sessions = await store.ListActiveSessionsAsync(id, Now(time));
             var logins = await store.ListLoginEventsAsync(id, beforeId: null, UserDetailLogins);
-            var names = new Dictionary<long, string> { [user.Id] = user.DisplayName };
             return Results.Ok(new UserDetail(
                 ToAdminUser(user, options.Value.AdminTelegramIdSet(), sessions.Count, await store.GetGrantsAsync(id)),
                 sessions.Select(s => new AdminSession(s.Id, s.CreatedAt, s.LastUsedAt, s.ExpiresAt, s.UserAgent, s.Ip)).ToList(),
-                logins.Select(e => ToAdminLoginEvent(e, names)).ToList()));
+                logins.Select(ToAdminLoginEvent).ToList()));
         });
 
-        admin.MapPut("/users/{id:long}/admin", async (long id, SetAdminRequest body, IAuthStore store) =>
-            await store.SetUserAdminAsync(id, body.IsAdmin) ? Results.NoContent() : NotFound("user_not_found"));
+        admin.MapPut("/users/{id:long}/admin", async (long id, SetAdminRequest body, IAuthStore store, UserAccessService access) =>
+        {
+            if (await store.GetUserAsync(id) is not { } user)
+                return NotFound("user_not_found");
+            // An owner is admin through the env whatever the flag says: changing it would be a silent no-op.
+            if (access.IsOwner(user.TelegramId))
+                return Bad("cannot_change_owner");
+            return await store.SetUserAdminAsync(id, body.IsAdmin) ? Results.NoContent() : NotFound("user_not_found");
+        });
 
         admin.MapPut("/users/{id:long}/blocked", async (long id, SetBlockedRequest body, IAuthStore store,
             UserAccessService access, TimeProvider time) =>
@@ -131,19 +137,25 @@ public static partial class AdminEndpoints
         });
 
         // ---- login journal
-        admin.MapGet("/logins", async (string? limit, long? before, IAuthStore store) =>
+        admin.MapGet("/logins", async (string? limit, string? before, IAuthStore store) =>
         {
             var take = DefaultLoginsLimit;
             if (limit is not null && (!int.TryParse(limit, NumberStyles.None, CultureInfo.InvariantCulture, out take)
                                       || take is < 1 or > MaxLoginsLimit))
                 return Bad("invalid_limit");
+            long? beforeId = null;
+            if (before is not null)
+            {
+                if (!long.TryParse(before, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed))
+                    return Bad("invalid_before");
+                beforeId = parsed;
+            }
 
             // One extra row tells whether another page exists.
-            var rows = await store.ListLoginEventsAsync(null, before, take + 1);
+            var rows = await store.ListLoginEventsAsync(null, beforeId, take + 1);
             var page = rows.Take(take).ToList();
-            var names = (await store.ListUsersAsync()).ToDictionary(u => u.Id, u => u.DisplayName);
             return Results.Ok(new LoginsPage(
-                page.Select(e => ToAdminLoginEvent(e, names)).ToList(),
+                page.Select(ToAdminLoginEvent).ToList(),
                 rows.Count > take ? page[^1].Id : null));
         });
 
@@ -250,10 +262,13 @@ public static partial class AdminEndpoints
         AccessPolicy.IsAdmin(u, owners), owners.Contains(u.TelegramId), u.IsBlocked, u.BlockedAt,
         u.CreatedAt, u.LastLoginAt, activeSessions, grants.Order(StringComparer.Ordinal).ToList());
 
-    private static AdminLoginEvent ToAdminLoginEvent(LoginEvent e, IReadOnlyDictionary<long, string> names) => new(
-        e.Id, e.At, e.UserId, e.TelegramId, e.UserId is { } id ? names.GetValueOrDefault(id) : null, e.Ip, e.UserAgent, e.Result);
+    private static AdminLoginEvent ToAdminLoginEvent(LoginEvent e) =>
+        new(e.Id, e.At, e.UserId, e.TelegramId, e.UserName, e.Ip, e.UserAgent, e.Result);
 
-    /// <summary><c>exhausted</c> wins over <c>expired</c>: no use left is the more final state.</summary>
+    /// <summary>
+    /// <c>exhausted</c> wins over <c>expired</c>: no use left is the more final state. A NULL expiry (never written by
+    /// the API, only possible for hand-made rows) never expires; it is serialised as <c>expiresAt: null</c>.
+    /// </summary>
     private static string InviteStatus(Invite i, DateTime now) =>
         i.Uses >= i.MaxUses ? "exhausted" : i.ExpiresAt <= now ? "expired" : "active";
 

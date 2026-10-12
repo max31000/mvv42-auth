@@ -119,6 +119,23 @@ public class MySqlMigrationTests
         Assert.Equal(["at"], indexes.Where(i => i.Name == "ix_login_events_at").Select(i => i.Column));
         Assert.Equal(["user_id", "at"], indexes.Where(i => i.Name == "ix_login_events_user_at").Select(i => i.Column));
     }
+
+    [MySqlFact]
+    public async Task DeletingUser_NullsUserAndTelegramIdInLoginEvents()
+    {
+        var store = new MySqlAuthStore(MySqlStoreFixture.ConnectionString!);
+        var tg = Random.Shared.NextInt64(1_000_000_000, 9_000_000_000);
+        var user = await store.UpsertUserAsync(new Mvv42.Auth.Telegram.TelegramProfile(tg, "Gone", null, null, null), DateTime.UtcNow);
+        var id = await store.AddLoginEventAsync(new LoginEvent { UserId = user.Id, TelegramId = tg, At = DateTime.UtcNow });
+
+        await using var conn = new MySqlConnector.MySqlConnection(MySqlStoreFixture.ConnectionString!);
+        await Dapper.SqlMapper.ExecuteAsync(conn, "DELETE FROM users WHERE id = @Id", new { user.Id });
+
+        var e = (await store.ListLoginEventsAsync(null, id + 1, 1)).Single();
+        Assert.Equal(id, e.Id);
+        Assert.Null(e.UserId);
+        Assert.Null(e.TelegramId);
+    }
 }
 
 public class MySqlConnectionStringTests

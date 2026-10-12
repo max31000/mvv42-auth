@@ -60,6 +60,7 @@ public interface IAuthStore
     // Invites
     Task<long> CreateInviteAsync(Invite invite);
     Task<IReadOnlyList<Invite>> ListInvitesAsync();
+    Task<Invite?> GetInviteByCodeHashAsync(string codeHash);
     Task<bool> DeleteInviteAsync(long id);
     /// <summary>
     /// Atomically: valid (not expired, uses &lt; max_uses) → uses+1 and grant (<see cref="InviteRedeemStatus.Granted"/>).
@@ -69,8 +70,12 @@ public interface IAuthStore
 
     // Login events
     Task<long> AddLoginEventAsync(LoginEvent loginEvent);
-    /// <summary>Newest first (by id); <paramref name="beforeId"/> = exclusive upper bound for paging.</summary>
+    /// <summary>
+    /// Newest first with <see cref="LoginEvent.UserName"/> filled: the whole journal by id (keyset paging,
+    /// <paramref name="beforeId"/> = exclusive upper bound); one user's events by time, then id.
+    /// </summary>
     Task<IReadOnlyList<LoginEvent>> ListLoginEventsAsync(long? userId, long? beforeId, int limit);
     Task<int> CountLoginEventsAsync(DateTime since, string result);
-    Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff);
+    /// <summary>Deletes events older than <paramref name="cutoff"/>; only with the given results when any are given.</summary>
+    Task<int> DeleteLoginEventsBeforeAsync(DateTime cutoff, params string[] results);
 }
