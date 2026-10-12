@@ -71,15 +71,16 @@ public static class AuthEndpoints
         if (check.Error == TelegramVerifyError.NotConfigured)
             return Error("telegram_not_configured", StatusCodes.Status503ServiceUnavailable);
 
-        // The telegram id of a payload that failed verification (or was replayed) is unverified: never stored.
+        // A payload that failed verification (or was replayed) has no verified identity behind it: neither the
+        // telegram id nor the client's IP / User-Agent is stored.
         if (!check.Ok)
         {
-            await LogLoginAsync(ctx, store, time, LoginResult.Invalid, null, null);
+            await LogLoginAsync(ctx, store, time, LoginResult.Invalid, null, null, withClient: false);
             return Error(check.Error.ToString(), check.IsMalformed ? StatusCodes.Status400BadRequest : StatusCodes.Status401Unauthorized);
         }
         if (!replay.TryUse(fields["hash"]))
         {
-            await LogLoginAsync(ctx, store, time, LoginResult.Replayed, null, null);
+            await LogLoginAsync(ctx, store, time, LoginResult.Replayed, null, null, withClient: false);
             return Error("Replayed", StatusCodes.Status401Unauthorized);
         }
 
@@ -92,22 +93,34 @@ public static class AuthEndpoints
         TelegramInvite? invite = null;
         if (existing is null && !access.IsOwner(profile.TelegramId))
         {
-            var registration = await RegisterAsync(ctx, store, time, inviteHasher, options.Value.GetRegistrationMode(), profile);
-            if (registration.Refusal is { } refusal)
+            var mode = options.Value.GetRegistrationMode();
+            var registration = await RegisterAsync(ctx, store, time, inviteHasher, mode, profile);
+            var refusal = registration.Refusal;
+            if (registration.Result is { Status: InviteRegistrationStatus.Registered } registered)
+            {
+                user = registered.User!;
+                invite = new TelegramInvite(registered.AppId);
+            }
+            else if (registration.Result?.Status == InviteRegistrationStatus.AlreadyRegistered)
+            {
+                // A parallel request created the row first: a known user now — but only if the row can be read back.
+                // Never re-create it through the upsert below in closed mode.
+                if (await store.GetUserByTelegramIdAsync(profile.TelegramId) is { } raced)
+                {
+                    if (access.IsEffectivelyBlocked(raced))
+                        return await DenyBlockedAsync(ctx, store, time, raced.Id, raced.TelegramId);
+                }
+                else if (mode == RegistrationMode.Invite)
+                    refusal = Error("invite_required", StatusCodes.Status403Forbidden);
+            }
+
+            if (refusal is not null)
             {
                 // Nothing was issued: the shell may resend the same widget data with a (better) code.
                 replay.Release(fields["hash"]);
                 await LogLoginAsync(ctx, store, time, LoginResult.DeniedUnregistered, null, null, withClient: false);
                 return refusal;
             }
-            if (registration.Result is { Status: InviteRegistrationStatus.Registered } registered)
-            {
-                user = registered.User!;
-                invite = new TelegramInvite(registered.AppId);
-            }
-            else if (registration.Result?.Status == InviteRegistrationStatus.AlreadyRegistered
-                     && await store.GetUserByTelegramIdAsync(profile.TelegramId) is { } raced && access.IsEffectivelyBlocked(raced))
-                return await DenyBlockedAsync(ctx, store, time, raced.Id, raced.TelegramId);
         }
 
         // Known user (or open registration without a usable code, or a parallel request created the row first).

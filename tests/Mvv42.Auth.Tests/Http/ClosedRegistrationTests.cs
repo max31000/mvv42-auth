@@ -218,6 +218,19 @@ public class ClosedRegistrationTests(InviteAuthAppFactory factory) : IClassFixtu
     }
 
     [Fact]
+    public async Task Stranger_RefusedPayload_ComesBackAtMostFiveTimes()
+    {
+        var fields = AuthAppFactory.WidgetData(AuthAppFactory.NewTelegramId());
+        var (code, id) = await InviteAsync(null);
+
+        for (var i = 0; i < 6; i++) // the first try + 5 releases
+            await AssertError(await PostTelegram(fields), HttpStatusCode.Forbidden, "invite_required");
+
+        await AssertError(await PostTelegram(fields, code), HttpStatusCode.Unauthorized, "Replayed");
+        Assert.Equal(0, await Uses(id));
+    }
+
+    [Fact]
     public async Task Stranger_LoginOnlyInvite_RegistersWithoutGrant_InviteAppIdNull()
     {
         var tg = AuthAppFactory.NewTelegramId();
@@ -313,6 +326,23 @@ public class ClosedRegistrationTests(InviteAuthAppFactory factory) : IClassFixtu
         Assert.Equal("Racer", body.GetProperty("user").GetProperty("name").GetString());
         Assert.Equal(0, await Uses(id, inner));
         Assert.Single(await inner.ListUsersAsync(), u => u.TelegramId == tg);
+    }
+
+    /// <summary>The store says "duplicate" but no row can be read back (e.g. deleted meanwhile): refuse, never re-create via upsert.</summary>
+    [Fact]
+    public async Task RegistrationRace_DuplicateWithoutRow_IsRefused_NothingCreated()
+    {
+        var inner = new InMemoryAuthStore();
+        using var app = factory.WithWebHostBuilder(b => b.ConfigureTestServices(s => s.AddSingleton(RaceLosingStore.Wrap(inner, createWinner: false))));
+        var (code, id) = await InviteAsync(null, hasher: app.Services.GetRequiredService<InviteCodeHasher>(), store: inner);
+        var tg = AuthAppFactory.NewTelegramId();
+
+        await AssertError(await Raw(app).SendAsync(TelegramRequest(AuthAppFactory.WidgetData(tg), code)), HttpStatusCode.Forbidden, "invite_required");
+
+        Assert.Empty(await inner.ListUsersAsync());
+        Assert.Equal(0, await Uses(id, inner));
+        var e = Assert.Single(await inner.ListLoginEventsAsync(null, null, 10));
+        Assert.Equal((LoginResult.DeniedUnregistered, (long?)null, (string?)null), (e.Result, e.TelegramId, e.UserAgent));
     }
 
     [Fact]
@@ -512,11 +542,14 @@ public class OpenRegistrationTests(AuthAppFactory factory) : IClassFixture<AuthA
 public class RaceLosingStore : DispatchProxy
 {
     private IAuthStore _inner = null!;
+    private bool _createWinner;
 
-    public static IAuthStore Wrap(IAuthStore inner)
+    /// <param name="createWinner">false: report the duplicate without any row existing (the winner is gone again).</param>
+    public static IAuthStore Wrap(IAuthStore inner, bool createWinner = true)
     {
         var proxy = Create<IAuthStore, RaceLosingStore>();
         ((RaceLosingStore)(object)proxy)._inner = inner;
+        ((RaceLosingStore)(object)proxy)._createWinner = createWinner;
         return proxy;
     }
 
@@ -524,6 +557,8 @@ public class RaceLosingStore : DispatchProxy
     {
         if (method!.Name == nameof(IAuthStore.RegisterWithInviteAsync))
         {
+            if (!_createWinner)
+                return Task.FromResult(new InviteRegistrationResult(InviteRegistrationStatus.AlreadyRegistered, null, null));
             var profile = (TelegramProfile)args![0]!;
             _inner.UpsertUserAsync(profile with { FirstName = "Winner" }, (DateTime)args[2]!).GetAwaiter().GetResult();
         }

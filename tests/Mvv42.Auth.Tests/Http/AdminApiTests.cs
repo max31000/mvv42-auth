@@ -297,6 +297,7 @@ public class AdminApiTests(AuthAppFactory factory) : IClassFixture<AuthAppFactor
     {
         var owner = await OwnerAsync();
         var client = factory.CreateBrowser();
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("JournalTest/1.0");
         var tg = AuthAppFactory.NewTelegramId();
 
         var forged = AuthAppFactory.WidgetData(tg);
@@ -314,7 +315,11 @@ public class AdminApiTests(AuthAppFactory factory) : IClassFixture<AuthAppFactor
             Assert.Equal(JsonValueKind.Null, unverified.GetProperty("telegramId").ValueKind);
             Assert.Equal(JsonValueKind.Null, unverified.GetProperty("userId").ValueKind);
             Assert.Equal(JsonValueKind.Null, unverified.GetProperty("userName").ValueKind);
+            // no verified identity behind it: no client data either
+            Assert.Equal(JsonValueKind.Null, unverified.GetProperty("ip").ValueKind);
+            Assert.Equal(JsonValueKind.Null, unverified.GetProperty("userAgent").ValueKind);
         }
+        Assert.Equal("JournalTest/1.0", items[1].GetProperty("userAgent").GetString());
         Assert.Equal(tg, items[1].GetProperty("telegramId").GetInt64());
         Assert.EndsWith("Z", items[1].GetProperty("at").GetString());
         Assert.True(items[1].TryGetProperty("ip", out _));

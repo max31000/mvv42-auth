@@ -25,4 +25,20 @@ public class TelegramReplayCacheTests
         Assert.True(_cache.TryUse("abc"));
         Assert.False(_cache.TryUse("abc"));
     }
+
+    /// <summary>A refused payload can come back at most <see cref="TelegramReplayCache.MaxReleases"/> times, then it stays used.</summary>
+    [Fact]
+    public void Release_IsBoundedPerHash()
+    {
+        Assert.True(_cache.TryUse("h"));
+        for (var i = 0; i < TelegramReplayCache.MaxReleases; i++)
+        {
+            _cache.Release("h");
+            Assert.True(_cache.TryUse("h"));
+        }
+
+        _cache.Release("h");
+        Assert.False(_cache.TryUse("h"));
+        Assert.Equal(5, TelegramReplayCache.MaxReleases);
+    }
 }
