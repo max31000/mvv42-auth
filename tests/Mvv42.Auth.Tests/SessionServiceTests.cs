@@ -182,16 +182,17 @@ public class SessionServiceTests
     }
 
     [Fact]
-    public async Task Cleanup_DeletesInvalidAndReplayedAfter7Days_KeepsOkAndDenied()
+    public async Task Cleanup_DeletesInvalidReplayedUnregisteredAfter7Days_KeepsOkAndBlocked()
     {
         var ids = new Dictionary<string, long>();
-        foreach (var result in new[] { LoginResult.Ok, LoginResult.DeniedBlocked, LoginResult.Invalid, LoginResult.Replayed })
+        foreach (var result in new[] { LoginResult.Ok, LoginResult.DeniedBlocked, LoginResult.Invalid, LoginResult.Replayed, LoginResult.DeniedUnregistered })
             ids[result] = await _store.AddLoginEventAsync(new LoginEvent { At = Now.AddDays(-8), Result = result });
         var freshInvalid = await _store.AddLoginEventAsync(new LoginEvent { At = Now.AddDays(-6), Result = LoginResult.Invalid });
+        var freshUnregistered = await _store.AddLoginEventAsync(new LoginEvent { At = Now.AddDays(-6), Result = LoginResult.DeniedUnregistered });
 
         await new SessionCleanupService(_store, _time, NullLogger<SessionCleanupService>.Instance).CleanupOnceAsync();
 
         var left = (await _store.ListLoginEventsAsync(null, null, 10)).Select(e => e.Id).ToHashSet();
-        Assert.Equal(new HashSet<long> { ids[LoginResult.Ok], ids[LoginResult.DeniedBlocked], freshInvalid }, left);
+        Assert.Equal(new HashSet<long> { ids[LoginResult.Ok], ids[LoginResult.DeniedBlocked], freshInvalid, freshUnregistered }, left);
     }
 }

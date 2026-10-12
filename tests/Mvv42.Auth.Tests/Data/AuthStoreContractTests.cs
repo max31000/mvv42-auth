@@ -244,6 +244,159 @@ public abstract class AuthStoreContractTests
         Assert.Empty(await Store.GetGrantsAsync(user.Id));
     }
 
+    // ---- closed registration (migrations 007–008)
+
+    private async Task<Invite> NewInviteFor(string? appId, int maxUses = 1, DateTime? expiresAt = null)
+    {
+        var invite = new Invite { CodeHash = Hash(), AppId = appId, MaxUses = maxUses, ExpiresAt = expiresAt, CreatedAt = T0 };
+        return invite with { Id = await Store.CreateInviteAsync(invite) };
+    }
+
+    private static TelegramProfile Profile(long tg) => new(tg, "New", "Comer", "newcomer", "https://t.me/i/new.jpg");
+
+    private async Task<int> Uses(long inviteId) => (await Store.ListInvitesAsync()).Single(i => i.Id == inviteId).Uses;
+
+    [Fact]
+    public async Task Invite_WithoutApp_RoundTrips()
+    {
+        var invite = await NewInviteFor(null, maxUses: 2);
+
+        Assert.Null((await Store.GetInviteByCodeHashAsync(invite.CodeHash))!.AppId);
+        Assert.Null((await Store.ListInvitesAsync()).Single(i => i.Id == invite.Id).AppId);
+    }
+
+    [Fact]
+    public async Task RegisterWithInvite_CreatesUser_ConsumesUse_AndGrantsApp()
+    {
+        var (invite, app) = await NewInvite(maxUses: 2);
+        var tg = UniqueTelegramId();
+
+        var result = await Store.RegisterWithInviteAsync(Profile(tg), [invite.CodeHash], T0);
+
+        Assert.Equal(InviteRegistrationStatus.Registered, result.Status);
+        Assert.Equal(app.Id, result.AppId);
+        var user = await Store.GetUserByTelegramIdAsync(tg);
+        Assert.NotNull(user);
+        Assert.Equal(user, result.User);
+        Assert.Equal(("New", "Comer", "newcomer", "https://t.me/i/new.jpg"), (user.FirstName, user.LastName, user.Username, user.PhotoUrl));
+        Assert.Equal((T0, (DateTime?)T0, false, false), (user.CreatedAt, user.LastLoginAt, user.IsAdmin, user.IsBlocked));
+        Assert.Equal(1, await Uses(invite.Id));
+        Assert.Equal([app.Id], await Store.GetGrantsAsync(user.Id));
+    }
+
+    [Fact]
+    public async Task RegisterWithInvite_LoginOnlyInvite_CreatesUserWithoutGrant()
+    {
+        var invite = await NewInviteFor(null);
+        var tg = UniqueTelegramId();
+
+        var result = await Store.RegisterWithInviteAsync(Profile(tg), [invite.CodeHash], T0);
+
+        Assert.Equal(InviteRegistrationStatus.Registered, result.Status);
+        Assert.Null(result.AppId);
+        Assert.Empty(await Store.GetGrantsAsync(result.User!.Id));
+        Assert.Equal(1, await Uses(invite.Id));
+    }
+
+    [Fact]
+    public async Task RegisterWithInvite_TriesHashesInOrder()
+    {
+        var invite = await NewInviteFor(null);
+
+        var result = await Store.RegisterWithInviteAsync(Profile(UniqueTelegramId()), [Hash(), invite.CodeHash], T0);
+
+        Assert.Equal(InviteRegistrationStatus.Registered, result.Status);
+        Assert.Equal(1, await Uses(invite.Id));
+    }
+
+    [Fact]
+    public async Task RegisterWithInvite_Refusals_StoreNothing()
+    {
+        var expired = await NewInviteFor(null, maxUses: 5, expiresAt: T0);
+        var exhausted = await NewInviteFor(null, maxUses: 1);
+        Assert.Equal(InviteRegistrationStatus.Registered,
+            (await Store.RegisterWithInviteAsync(Profile(UniqueTelegramId()), [exhausted.CodeHash], T0)).Status);
+        var tg = UniqueTelegramId();
+
+        Assert.Equal(new InviteRegistrationResult(InviteRegistrationStatus.NotFound, null, null),
+            await Store.RegisterWithInviteAsync(Profile(tg), [Hash(), Hash()], T0));
+        Assert.Equal(new InviteRegistrationResult(InviteRegistrationStatus.Expired, null, null),
+            await Store.RegisterWithInviteAsync(Profile(tg), [expired.CodeHash], T0));
+        Assert.Equal(new InviteRegistrationResult(InviteRegistrationStatus.Exhausted, null, null),
+            await Store.RegisterWithInviteAsync(Profile(tg), [exhausted.CodeHash], T0));
+
+        Assert.Null(await Store.GetUserByTelegramIdAsync(tg));
+        Assert.Equal(0, await Uses(expired.Id));
+        Assert.Equal(1, await Uses(exhausted.Id));
+    }
+
+    /// <summary>Plain INSERT, not an upsert: an existing telegram id is a known user, the invite is not consumed.</summary>
+    [Fact]
+    public async Task RegisterWithInvite_ExistingTelegramId_IsAlreadyRegistered_WithoutConsumingTheInvite()
+    {
+        var (invite, _) = await NewInvite(maxUses: 1);
+        var existing = await NewUser();
+
+        var result = await Store.RegisterWithInviteAsync(Profile(existing.TelegramId), [invite.CodeHash], T0.AddDays(1));
+
+        Assert.Equal(new InviteRegistrationResult(InviteRegistrationStatus.AlreadyRegistered, null, null), result);
+        Assert.Equal(0, await Uses(invite.Id));
+        Assert.Empty(await Store.GetGrantsAsync(existing.Id));
+        Assert.Equal(existing, await Store.GetUserByTelegramIdAsync(existing.TelegramId)); // profile untouched
+    }
+
+    [Fact]
+    public async Task RegisterWithInvite_Concurrent_NeverOverspends()
+    {
+        var invite = await NewInviteFor(null, maxUses: 2);
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ =>
+            Task.Run(() => Store.RegisterWithInviteAsync(Profile(UniqueTelegramId()), [invite.CodeHash], T0))));
+
+        Assert.Equal(2, results.Count(r => r.Status == InviteRegistrationStatus.Registered));
+        Assert.Equal(4, results.Count(r => r.Status == InviteRegistrationStatus.Exhausted));
+        Assert.Equal(2, await Uses(invite.Id));
+    }
+
+    [Fact]
+    public async Task RegisterWithInvite_ConcurrentSameTelegramId_OneUserOneUse()
+    {
+        var invite = await NewInviteFor(null, maxUses: 5);
+        var tg = UniqueTelegramId();
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ =>
+            Task.Run(() => Store.RegisterWithInviteAsync(Profile(tg), [invite.CodeHash], T0))));
+
+        Assert.Equal(1, results.Count(r => r.Status == InviteRegistrationStatus.Registered));
+        Assert.Equal(3, results.Count(r => r.Status == InviteRegistrationStatus.AlreadyRegistered));
+        Assert.Equal(1, await Uses(invite.Id));
+        Assert.Single(await Store.ListUsersAsync(), u => u.TelegramId == tg);
+    }
+
+    [Fact]
+    public async Task RedeemInvite_LoginOnlyInvite_IsAlreadyGranted_WithoutConsumingUse()
+    {
+        var invite = await NewInviteFor(null);
+        var user = await NewUser();
+
+        Assert.Equal(new InviteRedeemResult(InviteRedeemStatus.AlreadyGranted, null), await Store.RedeemInviteAsync(invite.CodeHash, user.Id, T0));
+        Assert.Equal(0, await Uses(invite.Id));
+        Assert.Empty(await Store.GetGrantsAsync(user.Id));
+    }
+
+    [Fact]
+    public async Task LoginEvents_DeniedUnregistered_IsStoredWithoutPii_AndCounted()
+    {
+        var at = new DateTime(1993, 3, 1, 0, 0, 0, DateTimeKind.Utc).AddMinutes(Random.Shared.Next(1_000_000));
+        var id = await Store.AddLoginEventAsync(new LoginEvent { At = at, Result = LoginResult.DeniedUnregistered });
+
+        var e = (await Store.ListLoginEventsAsync(null, id + 1, 1)).Single();
+        Assert.Equal((id, LoginResult.DeniedUnregistered), (e.Id, e.Result));
+        Assert.Equal((null, null, null, null, null), (e.UserId, e.TelegramId, e.Ip, e.UserAgent, e.UserName));
+        Assert.Equal(1, await Store.CountLoginEventsAsync(at, LoginResult.DeniedUnregistered)
+                        - await Store.CountLoginEventsAsync(at.AddTicks(10), LoginResult.DeniedUnregistered));
+    }
+
     // ---- admin extensions (migrations 003–006)
 
     [Fact]

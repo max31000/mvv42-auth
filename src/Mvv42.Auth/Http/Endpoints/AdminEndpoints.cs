@@ -51,7 +51,7 @@ public static partial class AdminEndpoints
     public sealed record Overview(int Users, int ActiveSessions, int Logins24h, int Logins7d, int Blocked, IReadOnlyList<OverviewApp> Apps);
 
     public sealed record AdminInvite(
-        long Id, string AppId, int MaxUses, int Uses, DateTime? ExpiresAt, long? CreatedBy, DateTime CreatedAt, string Status);
+        long Id, string? AppId, int MaxUses, int Uses, DateTime? ExpiresAt, long? CreatedBy, DateTime CreatedAt, string Status);
 
     private static IResult Error(string error, int status) => Results.Json(new { error }, statusCode: status);
 

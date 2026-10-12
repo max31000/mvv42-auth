@@ -34,7 +34,7 @@ public static class InviteEndpoints
 
             // The policy already lets the caller use the app (admin/owner, public app, existing grant): nothing to
             // grant, so no use is consumed, whatever state the invite is in.
-            if (await store.GetInviteByCodeHashAsync(codeHash) is { } invite && callerAccess.AllowedApps.Contains(invite.AppId))
+            if (await store.GetInviteByCodeHashAsync(codeHash) is { AppId: { } inviteApp } invite && callerAccess.AllowedApps.Contains(inviteApp))
             {
                 cookies.SetAccess(ctx.Response, access.Issue(callerAccess));
                 return Results.Ok(new RedeemResponse(invite.AppId, AlreadyGranted: true, UserAccessService.ToMe(callerAccess)));

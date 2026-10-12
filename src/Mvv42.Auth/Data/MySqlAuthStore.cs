@@ -305,6 +305,8 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
             $"SELECT {InviteColumns} FROM invites WHERE code_hash = @codeHash FOR UPDATE", new { codeHash }, tx);
         if (invite is null)
             return new InviteRedeemResult(InviteRedeemStatus.NotFound, null);
+        if (invite.AppId is null) // login-only invite: nothing to grant to a logged-in user
+            return new InviteRedeemResult(InviteRedeemStatus.AlreadyGranted, null);
 
         var alreadyGranted = await conn.ExecuteScalarAsync<long>(
             "SELECT COUNT(*) FROM app_grants WHERE user_id = @userId AND app_id = @AppId",
@@ -322,6 +324,53 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
             new { userId, invite.AppId, now }, tx);
         await tx.CommitAsync();
         return new InviteRedeemResult(InviteRedeemStatus.Granted, invite.AppId);
+    }
+
+    public async Task<InviteRegistrationResult> RegisterWithInviteAsync(TelegramProfile p, IReadOnlyList<string> codeHashes, DateTime now)
+    {
+        await using var conn = await OpenAsync();
+        await using var tx = await conn.BeginTransactionAsync();
+
+        // Row lock serialises concurrent registrations on the same code (uses can never overshoot max_uses).
+        Invite? invite = null;
+        foreach (var codeHash in codeHashes)
+        {
+            invite = await conn.QuerySingleOrDefaultAsync<Invite>(
+                $"SELECT {InviteColumns} FROM invites WHERE code_hash = @codeHash FOR UPDATE", new { codeHash }, tx);
+            if (invite is not null)
+                break;
+        }
+        if (invite is null)
+            return new InviteRegistrationResult(InviteRegistrationStatus.NotFound, null, null);
+        if (invite.ExpiresAt <= now)
+            return new InviteRegistrationResult(InviteRegistrationStatus.Expired, null, null);
+        if (invite.Uses >= invite.MaxUses)
+            return new InviteRegistrationResult(InviteRegistrationStatus.Exhausted, null, null);
+
+        long userId;
+        try
+        {
+            // Plain INSERT (no upsert): an existing telegram id means a known user, handled by the caller.
+            userId = await conn.ExecuteScalarAsync<long>("""
+                INSERT INTO users (telegram_id, username, first_name, last_name, photo_url, created_at, last_login_at)
+                VALUES (@TelegramId, @Username, @FirstName, @LastName, @PhotoUrl, @now, @now);
+                SELECT LAST_INSERT_ID();
+                """, new { p.TelegramId, p.Username, p.FirstName, p.LastName, p.PhotoUrl, now }, tx);
+        }
+        catch (MySqlException ex) when (ex.ErrorCode == MySqlErrorCode.DuplicateKeyEntry)
+        {
+            await tx.RollbackAsync();
+            return new InviteRegistrationResult(InviteRegistrationStatus.AlreadyRegistered, null, null);
+        }
+
+        await conn.ExecuteAsync("UPDATE invites SET uses = uses + 1 WHERE id = @Id", new { invite.Id }, tx);
+        if (invite.AppId is not null)
+            await conn.ExecuteAsync(
+                "INSERT IGNORE INTO app_grants (user_id, app_id, created_at) VALUES (@userId, @AppId, @now)",
+                new { userId, invite.AppId, now }, tx);
+        var user = await conn.QuerySingleAsync<User>($"SELECT {UserColumns} FROM users WHERE id = @userId", new { userId }, tx);
+        await tx.CommitAsync();
+        return new InviteRegistrationResult(InviteRegistrationStatus.Registered, user, invite.AppId);
     }
 
     // ---- login events

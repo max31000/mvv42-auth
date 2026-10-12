@@ -112,6 +112,22 @@ public class MySqlMigrationTests
         Assert.Equal(1, await Count(column, new { table = "users", name = "blocked_at" }));
         Assert.Equal(1, await Count(column, new { table = "sessions", name = "ip" }));
 
+        // 007/008 (closed registration), still right after being re-applied on top of themselves
+        var appId = await Dapper.SqlMapper.QuerySingleAsync<(string Nullable, string Type, string Collation)>(conn, """
+            SELECT is_nullable, column_type, collation_name FROM information_schema.columns
+            WHERE table_schema = DATABASE() AND table_name = 'invites' AND column_name = 'app_id'
+            """);
+        Assert.Equal(("YES", "varchar(64)", "utf8mb4_unicode_ci"), appId);
+        var result = await Dapper.SqlMapper.QuerySingleAsync<(string Nullable, string Type)>(conn, """
+            SELECT is_nullable, column_type FROM information_schema.columns
+            WHERE table_schema = DATABASE() AND table_name = 'login_events' AND column_name = 'result'
+            """);
+        Assert.Equal(("NO", "enum('ok','denied_blocked','invalid','replayed','denied_unregistered')"), result);
+        Assert.Equal(1, await Count("""
+            SELECT COUNT(*) FROM information_schema.referential_constraints
+            WHERE constraint_schema = DATABASE() AND table_name = @table AND constraint_name = @name
+            """, new { table = "invites", name = "fk_invites_app" }));
+
         var indexes = (await Dapper.SqlMapper.QueryAsync<(string Name, string Column, long Seq)>(conn, """
             SELECT index_name, column_name, seq_in_index FROM information_schema.statistics
             WHERE table_schema = DATABASE() AND table_name = 'login_events' ORDER BY index_name, seq_in_index

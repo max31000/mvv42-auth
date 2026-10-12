@@ -86,6 +86,8 @@ public class MigrationRunnerTests
     [InlineData("004_users_blocked_at.sql", "ALTER TABLE users ADD COLUMN blocked_at")]
     [InlineData("005_sessions_ip.sql", "ALTER TABLE sessions ADD COLUMN ip")]
     [InlineData("006_login_events.sql", "CREATE TABLE IF NOT EXISTS login_events (")]
+    [InlineData("007_invites_app_nullable.sql", "ALTER TABLE invites MODIFY app_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL")]
+    [InlineData("008_login_events_unregistered.sql", "ALTER TABLE login_events MODIFY result ENUM(''ok'',''denied_blocked'',''invalid'',''replayed'',''denied_unregistered'') NOT NULL")]
     public void AdminMigrations_OneSchemaChangeEach(string fileName, string change)
     {
         var sql = string.Join('\n', MigrationRunner.SplitSqlStatements(ReadMigration(fileName)));
@@ -101,6 +103,18 @@ public class MigrationRunnerTests
         Assert.Contains("KEY ix_login_events_at (at)", sql, StringComparison.Ordinal);
         Assert.Contains("KEY ix_login_events_user_at (user_id, at)", sql, StringComparison.Ordinal);
         Assert.Contains("ENUM('ok','denied_blocked','invalid','replayed')", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Closed registration, review decision 11: the guards that make 007/008 re-runnable.</summary>
+    [Theory]
+    [InlineData("007_invites_app_nullable.sql", "table_name = 'invites' AND column_name = 'app_id' AND is_nullable = 'NO'")]
+    [InlineData("008_login_events_unregistered.sql", "table_name = 'login_events' AND column_name = 'result' AND column_type NOT LIKE '%denied_unregistered%'")]
+    public void ClosedRegistrationMigrations_AreGuarded(string fileName, string guard)
+    {
+        var statement = Assert.Single(MigrationRunner.SplitSqlStatements(ReadMigration(fileName)), s => s.StartsWith("SET @ddl", StringComparison.Ordinal));
+        Assert.Contains(guard, statement, StringComparison.Ordinal);
+        // The guard counts rows that still need the change: > 0 → run the ALTER, else DO 0.
+        Assert.Matches(@"\) > 0, 'ALTER TABLE [^']*(''[^']*)*', 'DO 0'\)$", statement);
     }
 
     [Fact]
