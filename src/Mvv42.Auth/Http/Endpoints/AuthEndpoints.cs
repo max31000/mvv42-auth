@@ -1,8 +1,12 @@
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.Extensions.Options;
 using Mvv42.Auth.Access;
 using Mvv42.Auth.Data;
+using Mvv42.Auth.Invites;
+using Mvv42.Auth.Options;
 using Mvv42.Auth.Sessions;
 using Mvv42.Auth.Telegram;
 
@@ -15,6 +19,21 @@ public static class AuthEndpoints
     /// <summary>Authenticated and the <c>tg</c> claim is in <c>Auth:AdminTelegramIds</c> (claim-based; all of /api/admin).</summary>
     public const string OwnerPolicy = "owner";
     public const string RateLimitPolicy = "per-ip";
+
+    /// <summary>Invite code for a first login (closed registration). Ignored for known users.</summary>
+    public const string InviteCodeHeader = "X-Invite-Code";
+
+    /// <param name="AppId">The app granted by the invite; null = login-only invite.</param>
+    public sealed record TelegramInvite(string? AppId);
+
+    /// <summary>
+    /// <c>/telegram</c> response: the <c>/me</c> payload plus <c>invite</c> — present only when this login registered the
+    /// user with an invite code (the shared <see cref="MeResponse"/> of <c>/me</c> and redeem is unchanged).
+    /// </summary>
+    public sealed record TelegramLoginResponse(
+        MeUser? User,
+        IReadOnlyList<MeApp> Apps,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TelegramInvite? Invite);
 
     /// <summary>Maps <c>/api/telegram|refresh|logout|me</c>; returns the <c>/api</c> group (OriginGuard applied).</summary>
     public static RouteGroupBuilder MapAuthApi(this IEndpointRouteBuilder app)
@@ -35,10 +54,14 @@ public static class AuthEndpoints
     /// <summary>
     /// POST /api/telegram — raw Login Widget object → session, both cookies, /me payload. Every attempt that gets past
     /// body parsing is written to <c>login_events</c>; a blocked user is refused before the profile is touched.
+    /// Closed registration: a user is known when a row with the telegram id exists or the id is an owner; anyone else
+    /// needs a valid <see cref="InviteCodeHeader"/> (<c>Auth:Registration=invite</c>), and a refusal stores nothing
+    /// about them and hands the widget payload back (not marked as used).
     /// </summary>
     private static async Task<IResult> TelegramLogin(
         JsonElement body, HttpContext ctx, TelegramVerifier verifier, IAuthStore store, SessionService sessions,
-        UserAccessService access, AuthCookies cookies, TimeProvider time, TelegramReplayCache replay)
+        UserAccessService access, AuthCookies cookies, TimeProvider time, TelegramReplayCache replay,
+        InviteCodeHasher inviteHasher, IOptions<AuthOptions> options)
     {
         var fields = TelegramAuthData.ToFields(body);
         if (fields is null)
@@ -61,10 +84,34 @@ public static class AuthEndpoints
         }
 
         var profile = TelegramAuthData.ToProfile(fields);
-        if (await store.GetUserByTelegramIdAsync(profile.TelegramId) is { } existing && access.IsEffectivelyBlocked(existing))
+        var existing = await store.GetUserByTelegramIdAsync(profile.TelegramId);
+        if (existing is not null && access.IsEffectivelyBlocked(existing))
             return await DenyBlockedAsync(ctx, store, time, existing.Id, existing.TelegramId);
 
-        var user = await store.UpsertUserAsync(profile, time.GetUtcNow().UtcDateTime);
+        User? user = null;
+        TelegramInvite? invite = null;
+        if (existing is null && !access.IsOwner(profile.TelegramId))
+        {
+            var registration = await RegisterAsync(ctx, store, time, inviteHasher, options.Value.GetRegistrationMode(), profile);
+            if (registration.Refusal is { } refusal)
+            {
+                // Nothing was issued: the shell may resend the same widget data with a (better) code.
+                replay.Release(fields["hash"]);
+                await LogLoginAsync(ctx, store, time, LoginResult.DeniedUnregistered, null, null, withClient: false);
+                return refusal;
+            }
+            if (registration.Result is { Status: InviteRegistrationStatus.Registered } registered)
+            {
+                user = registered.User!;
+                invite = new TelegramInvite(registered.AppId);
+            }
+            else if (registration.Result?.Status == InviteRegistrationStatus.AlreadyRegistered
+                     && await store.GetUserByTelegramIdAsync(profile.TelegramId) is { } raced && access.IsEffectivelyBlocked(raced))
+                return await DenyBlockedAsync(ctx, store, time, raced.Id, raced.TelegramId);
+        }
+
+        // Known user (or open registration without a usable code, or a parallel request created the row first).
+        user ??= await store.UpsertUserAsync(profile, time.GetUtcNow().UtcDateTime);
 
         // A new login replaces whatever session this browser had.
         await sessions.RevokeAsync(cookies.ReadRefresh(ctx.Request));
@@ -80,7 +127,35 @@ public static class AuthEndpoints
         await LogLoginAsync(ctx, store, time, LoginResult.Ok, user.Id, user.TelegramId);
         cookies.SetAccess(ctx.Response, access.Issue(userAccess));
         cookies.SetRefresh(ctx.Response, refreshToken, session.ExpiresAt);
-        return Results.Ok(UserAccessService.ToMe(userAccess));
+        var me = UserAccessService.ToMe(userAccess);
+        return Results.Ok(new TelegramLoginResponse(me.User, me.Apps, invite));
+    }
+
+    /// <summary>Outcome for an unknown user: a refusal to return, or the registration attempt (null = no usable code, open mode).</summary>
+    private readonly record struct Registration(IResult? Refusal, InviteRegistrationResult? Result);
+
+    private static async Task<Registration> RegisterAsync(
+        HttpContext ctx, IAuthStore store, TimeProvider time, InviteCodeHasher hasher, RegistrationMode mode, TelegramProfile profile)
+    {
+        var closed = mode == RegistrationMode.Invite;
+        var header = ctx.Request.Headers[InviteCodeHeader].ToString();
+        if (string.IsNullOrWhiteSpace(header))
+            return new(closed ? Error("invite_required", StatusCodes.Status403Forbidden) : null, null);
+        if (InviteCodes.Parse(header) is not { } code)
+            return new(closed ? Error("invalid_invite_format", StatusCodes.Status400BadRequest) : null, null);
+
+        var result = await store.RegisterWithInviteAsync(profile, hasher.Candidates(code), time.GetUtcNow().UtcDateTime);
+        var error = result.Status switch
+        {
+            InviteRegistrationStatus.NotFound => "invite_not_found",
+            InviteRegistrationStatus.Expired => "invite_expired",
+            InviteRegistrationStatus.Exhausted => "invite_exhausted",
+            _ => null,
+        };
+        if (error is null)
+            return new(null, result);
+        // Open registration: a bad code is ignored, the user registers without it.
+        return closed ? new(Error(error, StatusCodes.Status400BadRequest), null) : new(null, null);
     }
 
     private static async Task<IResult> DenyBlockedAsync(HttpContext ctx, IAuthStore store, TimeProvider time, long userId, long telegramId)
@@ -89,8 +164,12 @@ public static class AuthEndpoints
         return Error("user_blocked", StatusCodes.Status403Forbidden);
     }
 
-    /// <summary>Best effort: a journal failure is logged and never fails the login itself.</summary>
-    private static async Task LogLoginAsync(HttpContext ctx, IAuthStore store, TimeProvider time, string result, long? userId, long? telegramId)
+    /// <summary>
+    /// Best effort: a journal failure is logged and never fails the login itself. <paramref name="withClient"/> = false
+    /// leaves IP and User-Agent out (refused strangers: only the time is stored).
+    /// </summary>
+    private static async Task LogLoginAsync(
+        HttpContext ctx, IAuthStore store, TimeProvider time, string result, long? userId, long? telegramId, bool withClient = true)
     {
         try
         {
@@ -99,8 +178,10 @@ public static class AuthEndpoints
                 UserId = userId,
                 TelegramId = telegramId,
                 At = time.GetUtcNow().UtcDateTime,
-                Ip = SessionService.Truncate(ClientIp.Of(ctx), 45),
-                UserAgent = SessionService.Truncate(ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua : null, 512),
+                Ip = withClient ? SessionService.Truncate(ClientIp.Of(ctx), 45) : null,
+                UserAgent = withClient
+                    ? SessionService.Truncate(ctx.Request.Headers.UserAgent.ToString() is { Length: > 0 } ua ? ua : null, 512)
+                    : null,
                 Result = result,
             });
         }
