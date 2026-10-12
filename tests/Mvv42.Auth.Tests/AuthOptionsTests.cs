@@ -44,4 +44,38 @@ public class AuthOptionsTests
         var ex = Assert.Throws<FormatException>(() => new AuthOptions { TrustedProxyCidrs = value }.TrustedProxyNetworks());
         Assert.Contains("Auth:TrustedProxyCidrs", ex.Message);
     }
+
+    [Fact]
+    public void Registration_DefaultsToInvite()
+    {
+        Assert.Equal(RegistrationMode.Invite, new AuthOptions().GetRegistrationMode());
+    }
+
+    [Theory]
+    [InlineData("invite", RegistrationMode.Invite)]
+    [InlineData("open", RegistrationMode.Open)]
+    [InlineData(" Open ", RegistrationMode.Open)]
+    public void Registration_Parsed(string value, RegistrationMode expected)
+    {
+        Assert.Equal(expected, new AuthOptions { Registration = value }.GetRegistrationMode());
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("closed")]
+    [InlineData("invites")]
+    public void Registration_Unknown_Throws(string value)
+    {
+        var ex = Assert.Throws<FormatException>(() => new AuthOptions { Registration = value }.GetRegistrationMode());
+        Assert.Contains("Auth:Registration", ex.Message);
+    }
+
+    [Fact]
+    public void StartupWarnings_InviteWithoutOwners_Warns()
+    {
+        Assert.Contains(new AuthOptions { Registration = "invite", AdminTelegramIds = "" }.StartupWarnings(),
+            w => w.Contains("Auth:AdminTelegramIds"));
+        Assert.Empty(new AuthOptions { Registration = "invite", AdminTelegramIds = "1000" }.StartupWarnings());
+        Assert.Empty(new AuthOptions { Registration = "open", AdminTelegramIds = "" }.StartupWarnings());
+    }
 }

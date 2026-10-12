@@ -81,6 +81,25 @@ public class HostingTests(AuthAppFactory factory) : IClassFixture<AuthAppFactory
     }
 
     [Fact]
+    public void UnknownRegistrationMode_RefusesToStart()
+    {
+        var broken = factory.WithWebHostBuilder(b => b.UseSetting("Auth:Registration", "closed"));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => broken.CreateClient());
+        Assert.Contains("Auth:Registration", ex.Message);
+    }
+
+    [Fact]
+    public void FirstStart_CreatesInvitePepperInKeysPath()
+    {
+        using var keys = new TempDir();
+        using var app = factory.WithWebHostBuilder(b => b.UseSetting("Auth:KeysPath", keys.Path));
+        _ = app.CreateClient();
+
+        Assert.Equal(32, new FileInfo(Path.Combine(keys.Path, "invite-pepper")).Length);
+    }
+
+    [Fact]
     public void MalformedTrustedProxyCidrs_RefuseToStart()
     {
         var broken = factory.WithWebHostBuilder(b => b.UseSetting("Auth:TrustedProxyCidrs", "172.18.0.1/99"));

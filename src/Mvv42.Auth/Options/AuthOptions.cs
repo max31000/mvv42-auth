@@ -4,6 +4,16 @@ using AspNetIPNetwork = Microsoft.AspNetCore.HttpOverrides.IPNetwork;
 
 namespace Mvv42.Auth.Options;
 
+/// <summary><c>Auth:Registration</c>: who may create an account on first login.</summary>
+public enum RegistrationMode
+{
+    /// <summary>Only with a valid invite code (header <c>X-Invite-Code</c>); owners always may.</summary>
+    Invite,
+
+    /// <summary>Anyone with a valid Telegram login (behaviour before the closed registration).</summary>
+    Open,
+}
+
 /// <summary>Section <c>Auth</c>. Env vars use <c>Auth__*</c>.</summary>
 public sealed class AuthOptions
 {
@@ -37,6 +47,12 @@ public sealed class AuthOptions
     /// (any container on a docker network could then spoof X-Forwarded-For).
     /// </summary>
     public string TrustedProxyCidrs { get; set; } = "172.16.0.0/12";
+
+    /// <summary>
+    /// <c>invite</c> (default) or <c>open</c>, see <see cref="Options.RegistrationMode"/>. Validated at startup: an unknown
+    /// value stops the service.
+    /// </summary>
+    public string Registration { get; set; } = "invite";
 
     /// <summary>App-level limit (defence in depth behind nginx limit_req) for /telegram, /refresh, /invites/redeem per client IP.</summary>
     public int RateLimitPerMinute { get; set; } = 30;
@@ -76,6 +92,20 @@ public sealed class AuthOptions
             ? id
             : throw new FormatException($"Auth:AdminTelegramIds: '{item}' is not a telegram id"))
         .ToHashSet();
+
+    /// <exception cref="FormatException">Not <c>invite</c> or <c>open</c>.</exception>
+    public RegistrationMode GetRegistrationMode() => (Registration ?? "").Trim().ToLowerInvariant() switch
+    {
+        "invite" => Options.RegistrationMode.Invite,
+        "open" => Options.RegistrationMode.Open,
+        _ => throw new FormatException($"Auth:Registration: '{Registration}' is not 'invite' or 'open'"),
+    };
+
+    /// <summary>Configurations that start but are probably a mistake (logged as warnings at startup).</summary>
+    public IReadOnlyList<string> StartupWarnings() =>
+        GetRegistrationMode() == Options.RegistrationMode.Invite && AdminTelegramIdSet().Count == 0
+            ? ["Auth:Registration is 'invite' but Auth:AdminTelegramIds is empty: nobody can create invites, new users cannot register"]
+            : [];
 
     /// <exception cref="FormatException">A value is not an IP address or CIDR.</exception>
     public IReadOnlyList<AspNetIPNetwork> TrustedProxyNetworks() => SplitList(TrustedProxyCidrs).Select(item =>
