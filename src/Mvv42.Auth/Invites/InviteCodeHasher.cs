@@ -33,10 +33,19 @@ public sealed class InviteCodeHasher
     public string Hash(string normalizedCode) =>
         Convert.ToHexString(HMACSHA256.HashData(_pepper, Encoding.UTF8.GetBytes(normalizedCode))).ToLowerInvariant();
 
-    /// <summary>Stored hashes the code may have, in lookup order: HMAC of the normalised code, then legacy SHA-256 of the raw code.</summary>
-    public IReadOnlyList<string> Candidates(InviteCode code) => code.Kind == InviteCodeKind.Normalized
-        ? [Hash(code.Value), SecretTokens.Sha256Hex(code.Raw)]
-        : [SecretTokens.Sha256Hex(code.Raw)];
+    /// <summary>
+    /// Stored hashes the code may have, in lookup order: HMAC of the normalised code (new format), then legacy SHA-256 of
+    /// the trimmed raw input — only when that raw input itself looks like a legacy code.
+    /// </summary>
+    public IReadOnlyList<string> Candidates(InviteCode code)
+    {
+        var candidates = new List<string>(2);
+        if (code.Kind == InviteCodeKind.Normalized)
+            candidates.Add(Hash(code.Value));
+        if (InviteCodes.LooksLegacy(code.Raw))
+            candidates.Add(SecretTokens.Sha256Hex(code.Raw));
+        return candidates;
+    }
 
     /// <summary>Same pattern as the signing keys: write <c>*.tmp</c> (0600), flush, rename; a lost race keeps the winner's file.</summary>
     private static void Create(string keysPath, string path)

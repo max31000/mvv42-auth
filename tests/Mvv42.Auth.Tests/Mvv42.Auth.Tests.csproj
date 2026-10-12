@@ -25,6 +25,7 @@
   <ItemGroup>
     <!-- The SDK is a copy-in file for apps; compile it here to test it against the real service. -->
     <Compile Include="..\..\sdk\dotnet\Mvv42Auth.cs" Link="Sdk\Mvv42Auth.cs" />
+    <EmbeddedResource Include="Invites\code-vectors.json" LogicalName="code-vectors.json" />
   </ItemGroup>
 
   <ItemGroup>

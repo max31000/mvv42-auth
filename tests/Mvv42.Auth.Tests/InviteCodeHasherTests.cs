@@ -64,12 +64,23 @@ public class InviteCodeHasherTests : IDisposable
     }
 
     [Fact]
-    public void Candidates_NewCode_HmacFirst_ThenLegacySha256OfRaw()
+    public void Candidates_NewCode_OnlyHmac()
     {
         var hasher = new InviteCodeHasher(_dir.Path);
         var code = InviteCodes.Parse(" abcd-efgh-jkmn ")!;
 
-        Assert.Equal([hasher.Hash("ABCDEFGHJKMN"), SecretTokens.Sha256Hex("abcd-efgh-jkmn")], hasher.Candidates(code));
+        Assert.Equal([hasher.Hash("ABCDEFGHJKMN")], hasher.Candidates(code));
+    }
+
+    /// <summary>The legacy SHA-256 candidate only when the trimmed raw value itself looks like a legacy code.</summary>
+    [Fact]
+    public void Candidates_NewCodeWhoseRawLooksLegacy_HmacFirst_ThenSha256OfRaw()
+    {
+        var hasher = new InviteCodeHasher(_dir.Path);
+        var code = InviteCodes.Parse("abcd-efgh-jkmn--------")!;
+
+        Assert.Equal(InviteCodeKind.Normalized, code.Kind);
+        Assert.Equal([hasher.Hash("ABCDEFGHJKMN"), SecretTokens.Sha256Hex("abcd-efgh-jkmn--------")], hasher.Candidates(code));
     }
 
     [Fact]

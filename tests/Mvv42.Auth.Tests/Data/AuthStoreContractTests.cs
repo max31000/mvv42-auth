@@ -310,6 +310,29 @@ public abstract class AuthStoreContractTests
     }
 
     [Fact]
+    public async Task FindInvite_ByAnyHash_PrefersEarlierCandidate()
+    {
+        var first = await NewInviteFor(null);
+        var second = await NewInviteFor(null);
+
+        Assert.Equal(second.Id, (await Store.FindInviteAsync([Hash(), second.CodeHash, first.CodeHash]))!.Id);
+        Assert.Equal(first.Id, (await Store.FindInviteAsync([first.CodeHash, second.CodeHash]))!.Id);
+        Assert.Null(await Store.FindInviteAsync([Hash()]));
+        Assert.Null(await Store.FindInviteAsync([]));
+    }
+
+    [Fact]
+    public async Task RegisterWithInvite_SeveralMatchingHashes_UsesTheFirstCandidate()
+    {
+        var first = await NewInviteFor(null);
+        var second = await NewInviteFor(null);
+
+        await Store.RegisterWithInviteAsync(Profile(UniqueTelegramId()), [second.CodeHash, first.CodeHash], T0);
+
+        Assert.Equal((0, 1), (await Uses(first.Id), await Uses(second.Id)));
+    }
+
+    [Fact]
     public async Task RegisterWithInvite_Refusals_StoreNothing()
     {
         var expired = await NewInviteFor(null, maxUses: 5, expiresAt: T0);

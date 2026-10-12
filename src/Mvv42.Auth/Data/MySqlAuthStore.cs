@@ -289,6 +289,21 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
             $"SELECT {InviteColumns} FROM invites WHERE code_hash = @codeHash", new { codeHash });
     }
 
+    public async Task<Invite?> FindInviteAsync(IReadOnlyList<string> codeHashes)
+    {
+        if (codeHashes.Count == 0)
+            return null;
+        await using var conn = await OpenAsync();
+        return Earliest(await conn.QueryAsync<Invite>(
+            $"SELECT {InviteColumns} FROM invites WHERE code_hash IN @codeHashes", new { codeHashes }), codeHashes);
+    }
+
+    private static Invite? Earliest(IEnumerable<Invite> rows, IReadOnlyList<string> codeHashes)
+    {
+        var byHash = rows.ToDictionary(i => i.CodeHash, StringComparer.Ordinal);
+        return codeHashes.Select(h => byHash.GetValueOrDefault(h)).FirstOrDefault(i => i is not null);
+    }
+
     public async Task<bool> DeleteInviteAsync(long id)
     {
         await using var conn = await OpenAsync();
@@ -331,15 +346,10 @@ public sealed class MySqlAuthStore(string connectionString) : IAuthStore
         await using var conn = await OpenAsync();
         await using var tx = await conn.BeginTransactionAsync();
 
-        // Row lock serialises concurrent registrations on the same code (uses can never overshoot max_uses).
-        Invite? invite = null;
-        foreach (var codeHash in codeHashes)
-        {
-            invite = await conn.QuerySingleOrDefaultAsync<Invite>(
-                $"SELECT {InviteColumns} FROM invites WHERE code_hash = @codeHash FOR UPDATE", new { codeHash }, tx);
-            if (invite is not null)
-                break;
-        }
+        // One locking read over every candidate: the row lock serialises concurrent registrations on the same code
+        // (uses can never overshoot max_uses).
+        var invite = codeHashes.Count == 0 ? null : Earliest(await conn.QueryAsync<Invite>(
+            $"SELECT {InviteColumns} FROM invites WHERE code_hash IN @codeHashes FOR UPDATE", new { codeHashes }, tx), codeHashes);
         if (invite is null)
             return new InviteRegistrationResult(InviteRegistrationStatus.NotFound, null, null);
         if (invite.ExpiresAt <= now)

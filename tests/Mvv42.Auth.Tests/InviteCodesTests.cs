@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Mvv42.Auth.Invites;
 
@@ -72,5 +73,44 @@ public class InviteCodesTests
             Assert.Equal(code.Replace("-", ""), parsed.Value);
         });
         Assert.Equal(codes.Count, codes.Distinct().Count());
+    }
+
+    /// <summary>
+    /// Parity with the shell: the same vectors (<c>portalShell/src/invite/code-vectors.json</c>, copied verbatim into
+    /// <c>Invites/code-vectors.json</c>) must give identical results on both sides.
+    /// </summary>
+    public static TheoryData<string, string, string?, string> SharedVectors()
+    {
+        using var stream = typeof(InviteCodesTests).Assembly.GetManifestResourceStream("code-vectors.json")!;
+        var data = new TheoryData<string, string, string?, string>();
+        foreach (var v in JsonDocument.Parse(stream).RootElement.EnumerateArray())
+            data.Add(v.GetProperty("input").GetString()!, v.GetProperty("result").GetString()!,
+                v.TryGetProperty("value", out var value) ? value.GetString() : null, v.GetProperty("note").GetString()!);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(SharedVectors))]
+    public void Parse_MatchesSharedShellVectors(string input, string result, string? value, string note)
+    {
+        var parsed = InviteCodes.Parse(input);
+
+        switch (result)
+        {
+            case "invalid":
+                Assert.True(parsed is null, note);
+                break;
+            case "normalized":
+                Assert.True(parsed is { Kind: InviteCodeKind.Normalized }, note);
+                Assert.Equal(value, parsed!.Value);
+                break;
+            case "legacy":
+                Assert.True(parsed is { Kind: InviteCodeKind.Legacy }, note);
+                Assert.Equal(value, parsed!.Value);
+                break;
+            default:
+                Assert.Fail($"unknown result '{result}' ({note})");
+                break;
+        }
     }
 }

@@ -199,6 +199,11 @@ public sealed class InMemoryAuthStore : IAuthStore
 
     public Task<Invite?> GetInviteByCodeHashAsync(string codeHash) => Run(() => _invites.FirstOrDefault(i => i.CodeHash == codeHash));
 
+    public Task<Invite?> FindInviteAsync(IReadOnlyList<string> codeHashes) => Run(() => FindInvite(codeHashes));
+
+    private Invite? FindInvite(IReadOnlyList<string> codeHashes) =>
+        codeHashes.Select(h => _invites.FirstOrDefault(i => i.CodeHash == h)).FirstOrDefault(i => i is not null);
+
     public Task<bool> DeleteInviteAsync(long id) => Run(() => _invites.RemoveAll(i => i.Id == id) > 0);
 
     public Task<InviteRedeemResult> RedeemInviteAsync(string codeHash, long userId, DateTime now) => Run(() =>
@@ -218,9 +223,8 @@ public sealed class InMemoryAuthStore : IAuthStore
 
     public Task<InviteRegistrationResult> RegisterWithInviteAsync(TelegramProfile p, IReadOnlyList<string> codeHashes, DateTime now) => Run(() =>
     {
-        var index = codeHashes.Select(h => _invites.FindIndex(i => i.CodeHash == h)).FirstOrDefault(i => i >= 0, -1);
-        if (index < 0) return new InviteRegistrationResult(InviteRegistrationStatus.NotFound, null, null);
-        var invite = _invites[index];
+        if (FindInvite(codeHashes) is not { } invite) return new InviteRegistrationResult(InviteRegistrationStatus.NotFound, null, null);
+        var index = _invites.IndexOf(invite);
         if (invite.ExpiresAt <= now) return new InviteRegistrationResult(InviteRegistrationStatus.Expired, null, null);
         if (invite.Uses >= invite.MaxUses) return new InviteRegistrationResult(InviteRegistrationStatus.Exhausted, null, null);
         if (_users.Any(u => u.TelegramId == p.TelegramId))
