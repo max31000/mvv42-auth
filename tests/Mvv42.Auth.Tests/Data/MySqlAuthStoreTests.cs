@@ -66,6 +66,49 @@ public class MySqlAuthStoreTests : IClassFixture<MySqlStoreFixture>
     }
 }
 
+/// <summary>Fact skipped unless <c>MVV42_AUTH_TEST_MYSQL</c> is set.</summary>
+public sealed class MySqlFactAttribute : FactAttribute
+{
+    public MySqlFactAttribute()
+    {
+        if (string.IsNullOrEmpty(MySqlStoreFixture.ConnectionString))
+            Skip = "MVV42_AUTH_TEST_MYSQL is not set";
+    }
+}
+
+/// <summary>
+/// MySQL commits DDL implicitly, so a crash between a migration's DDL and its <c>_migrations</c> row re-runs it:
+/// every migration must apply cleanly on top of itself (spec §10.9).
+/// </summary>
+[Trait("Category", "MySql")]
+public class MySqlMigrationTests : IClassFixture<MySqlStoreFixture>
+{
+    [MySqlFact]
+    public async Task EveryMigration_ReappliesOnTopOfItself_AndSchemaHasAdminColumnsAndIndexes()
+    {
+        await using var conn = new MySqlConnector.MySqlConnection(
+            MigrationRunner.ConnectionStringForMigrations(MySqlStoreFixture.ConnectionString!));
+        await conn.OpenAsync();
+
+        foreach (var (_, sql) in MigrationRunner.EmbeddedMigrations())
+            foreach (var statement in MigrationRunner.SplitSqlStatements(sql))
+                await Dapper.SqlMapper.ExecuteAsync(conn, statement);
+
+        async Task<long> Count(string sql, object args) => await Dapper.SqlMapper.ExecuteScalarAsync<long>(conn, sql, args);
+        const string column = "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = @table AND column_name = @name";
+        Assert.Equal(1, await Count(column, new { table = "users", name = "is_blocked" }));
+        Assert.Equal(1, await Count(column, new { table = "users", name = "blocked_at" }));
+        Assert.Equal(1, await Count(column, new { table = "sessions", name = "ip" }));
+
+        var indexes = (await Dapper.SqlMapper.QueryAsync<(string Name, string Column, long Seq)>(conn, """
+            SELECT index_name, column_name, seq_in_index FROM information_schema.statistics
+            WHERE table_schema = DATABASE() AND table_name = 'login_events' ORDER BY index_name, seq_in_index
+            """)).ToList();
+        Assert.Equal(["at"], indexes.Where(i => i.Name == "ix_login_events_at").Select(i => i.Column));
+        Assert.Equal(["user_id", "at"], indexes.Where(i => i.Name == "ix_login_events_user_at").Select(i => i.Column));
+    }
+}
+
 public class MySqlConnectionStringTests
 {
     [Theory]
@@ -75,6 +118,7 @@ public class MySqlConnectionStringTests
     {
         var normalized = new MySqlConnector.MySqlConnectionStringBuilder(MySqlAuthStore.Normalize(configured));
         Assert.Equal(MySqlConnector.MySqlGuidFormat.None, normalized.GuidFormat);
+        Assert.Equal(MySqlConnector.MySqlDateTimeKind.Utc, normalized.DateTimeKind);
         Assert.Equal("mvv42_auth", normalized.Database);
     }
 }

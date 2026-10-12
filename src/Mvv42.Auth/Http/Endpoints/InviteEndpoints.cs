@@ -17,8 +17,8 @@ public static class InviteEndpoints
                 return Results.Json(new { error = "invalid_invite" }, statusCode: StatusCodes.Status400BadRequest);
 
             var userId = ctx.User.CurrentUserId()!.Value;
-            var appId = await store.RedeemInviteAsync(SecretTokens.Sha256Hex(body.Code.Trim()), userId, time.GetUtcNow().UtcDateTime);
-            if (appId is null)
+            var result = await store.RedeemInviteAsync(SecretTokens.Sha256Hex(body.Code.Trim()), userId, time.GetUtcNow().UtcDateTime);
+            if (result.Status is not (InviteRedeemStatus.Granted or InviteRedeemStatus.AlreadyGranted))
                 return Results.Json(new { error = "invalid_invite" }, statusCode: StatusCodes.Status400BadRequest);
 
             var userAccess = await access.GetAsync(userId);

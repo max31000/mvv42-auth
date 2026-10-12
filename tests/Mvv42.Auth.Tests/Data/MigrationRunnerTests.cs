@@ -57,8 +57,57 @@ public class MigrationRunnerTests
                 Assert.StartsWith("CREATE TABLE IF NOT EXISTS ", statement, StringComparison.OrdinalIgnoreCase);
             else if (statement.StartsWith("INSERT", StringComparison.OrdinalIgnoreCase))
                 Assert.StartsWith("INSERT IGNORE ", statement, StringComparison.OrdinalIgnoreCase);
+            else if (statement.StartsWith("SET @ddl", StringComparison.OrdinalIgnoreCase))
+            {
+                // Guarded ALTER: runs only when information_schema says the change is not there yet, else DO 0.
+                Assert.Contains("information_schema.", statement, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("table_schema = DATABASE()", statement, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains("'DO 0'", statement, StringComparison.Ordinal);
+            }
+            else if (statement is "PREPARE mvv42_ddl FROM @ddl" or "EXECUTE mvv42_ddl" or "DEALLOCATE PREPARE mvv42_ddl")
+            {
+            }
             else
                 Assert.Fail($"Unexpected statement kind (make it idempotent and extend this test): {statement[..Math.Min(60, statement.Length)]}");
         }
+    }
+
+    private static string ReadMigration(string fileName)
+    {
+        var assembly = typeof(MigrationRunner).Assembly;
+        var name = Assert.Single(assembly.GetManifestResourceNames(), n => n.EndsWith(".Migrations." + fileName));
+        using var reader = new StreamReader(assembly.GetManifestResourceStream(name)!);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>Spec §10.9: one schema change per file (so a crash between DDL and bookkeeping can only leave one).</summary>
+    [Theory]
+    [InlineData("003_users_blocked.sql", "ALTER TABLE users ADD COLUMN is_blocked")]
+    [InlineData("004_users_blocked_at.sql", "ALTER TABLE users ADD COLUMN blocked_at")]
+    [InlineData("005_sessions_ip.sql", "ALTER TABLE sessions ADD COLUMN ip")]
+    [InlineData("006_login_events.sql", "CREATE TABLE IF NOT EXISTS login_events (")]
+    public void AdminMigrations_OneSchemaChangeEach(string fileName, string change)
+    {
+        var sql = string.Join('\n', MigrationRunner.SplitSqlStatements(ReadMigration(fileName)));
+        Assert.Contains(change, sql, StringComparison.Ordinal);
+        var ddl = System.Text.RegularExpressions.Regex.Matches(sql, @"\b(ALTER TABLE|CREATE TABLE)\b").Count;
+        Assert.Equal(1, ddl);
+    }
+
+    [Fact]
+    public void LoginEvents_HasIndexesOnAt_AndUserIdAt()
+    {
+        var sql = ReadMigration("006_login_events.sql");
+        Assert.Contains("KEY ix_login_events_at (at)", sql, StringComparison.Ordinal);
+        Assert.Contains("KEY ix_login_events_user_at (user_id, at)", sql, StringComparison.Ordinal);
+        Assert.Contains("ENUM('ok','denied_blocked','invalid','replayed')", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MigrationConnection_AllowsUserVariables_ForGuardedDdl()
+    {
+        var cs = new MySqlConnector.MySqlConnectionStringBuilder(
+            MigrationRunner.ConnectionStringForMigrations("Server=db;Database=x;User ID=u;Password=p"));
+        Assert.True(cs.AllowUserVariables);
     }
 }

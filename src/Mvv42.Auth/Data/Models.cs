@@ -11,6 +11,10 @@ public sealed record User
     public string? LastName { get; init; }
     public string? PhotoUrl { get; init; }
     public bool IsAdmin { get; init; }
+
+    /// <summary>Blocked users get no tokens: <c>/telegram</c> → 403, refresh → 401, sessions revoked (spec §10.8).</summary>
+    public bool IsBlocked { get; init; }
+    public DateTime? BlockedAt { get; init; }
     public DateTime CreatedAt { get; init; }
     public DateTime? LastLoginAt { get; init; }
 
@@ -65,6 +69,9 @@ public sealed record Session
     public DateTime LastUsedAt { get; init; }
     public DateTime? RevokedAt { get; init; }
     public string? UserAgent { get; init; }
+
+    /// <summary>Client IP at login, normalised (IPv4-mapped IPv6 → IPv4).</summary>
+    public string? Ip { get; init; }
 }
 
 public sealed record Invite
@@ -91,3 +98,40 @@ public sealed record RefreshHistoryEntry
     public long SessionId { get; init; }
     public DateTime RotatedAt { get; init; }
 }
+
+public static class LoginResult
+{
+    public const string Ok = "ok";
+    public const string DeniedBlocked = "denied_blocked";
+    public const string Invalid = "invalid";
+    public const string Replayed = "replayed";
+}
+
+/// <summary>
+/// One <c>/telegram</c> attempt. <see cref="UserId"/>/<see cref="TelegramId"/> are null for
+/// <see cref="LoginResult.Invalid"/>/<see cref="LoginResult.Replayed"/>: an unverified telegram id is never stored.
+/// </summary>
+public sealed record LoginEvent
+{
+    public long Id { get; init; }
+    public long? UserId { get; init; }
+    public long? TelegramId { get; init; }
+    public DateTime At { get; init; }
+    public string? Ip { get; init; }
+    public string? UserAgent { get; init; }
+    public string Result { get; init; } = LoginResult.Ok;
+}
+
+public enum InviteRedeemStatus
+{
+    Granted,
+
+    /// <summary>The user already had the grant: no use consumed (even if the invite is expired/exhausted).</summary>
+    AlreadyGranted,
+    NotFound,
+    Expired,
+    Exhausted,
+}
+
+/// <param name="AppId">The invite's app; null only for <see cref="InviteRedeemStatus.NotFound"/>.</param>
+public sealed record InviteRedeemResult(InviteRedeemStatus Status, string? AppId);

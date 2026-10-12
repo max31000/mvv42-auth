@@ -12,7 +12,7 @@ public sealed class MigrationRunner(string connectionString, ILogger<MigrationRu
 {
     public async Task RunAsync()
     {
-        await using var conn = new MySqlConnection(connectionString);
+        await using var conn = new MySqlConnection(ConnectionStringForMigrations(connectionString));
         await conn.OpenAsync();
 
         await conn.ExecuteAsync("""
@@ -27,23 +27,12 @@ public sealed class MigrationRunner(string connectionString, ILogger<MigrationRu
 
         var applied = (await conn.QueryAsync<string>("SELECT FileName FROM _migrations")).ToHashSet();
 
-        var assembly = Assembly.GetExecutingAssembly();
-        var resources = assembly.GetManifestResourceNames()
-            .Where(n => n.Contains(".Migrations.") && n.EndsWith(".sql", StringComparison.Ordinal))
-            .OrderBy(n => n, StringComparer.Ordinal);
-
-        foreach (var resource in resources)
+        foreach (var (fileName, sql) in EmbeddedMigrations())
         {
-            var parts = resource.Split('.');
-            var fileName = string.Join(".", parts.TakeLast(2)); // "001_init.sql"
             if (applied.Contains(fileName))
                 continue;
 
             logger.LogInformation("Applying migration {FileName}", fileName);
-            await using var stream = assembly.GetManifestResourceStream(resource)!;
-            using var reader = new StreamReader(stream);
-            var sql = await reader.ReadToEndAsync();
-
             await using var tx = await conn.BeginTransactionAsync();
             foreach (var statement in SplitSqlStatements(sql))
                 await conn.ExecuteAsync(statement, transaction: tx);
@@ -51,6 +40,28 @@ public sealed class MigrationRunner(string connectionString, ILogger<MigrationRu
             await tx.CommitAsync();
         }
     }
+
+    /// <summary>Embedded <c>Data/Migrations/*.sql</c> in name order: ("001_init.sql", content).</summary>
+    internal static IEnumerable<(string FileName, string Sql)> EmbeddedMigrations()
+    {
+        var assembly = Assembly.GetExecutingAssembly();
+        var resources = assembly.GetManifestResourceNames()
+            .Where(n => n.Contains(".Migrations.") && n.EndsWith(".sql", StringComparison.Ordinal))
+            .OrderBy(n => n, StringComparer.Ordinal);
+
+        foreach (var resource in resources)
+        {
+            using var reader = new StreamReader(assembly.GetManifestResourceStream(resource)!);
+            yield return (string.Join(".", resource.Split('.').TakeLast(2)), reader.ReadToEnd());
+        }
+    }
+
+    /// <summary>
+    /// Guarded ALTERs (003+) keep the statement in a session variable (<c>SET @ddl = IF(...)</c> → PREPARE/EXECUTE);
+    /// MySqlConnector rejects unknown <c>@names</c> unless user variables are allowed.
+    /// </summary>
+    internal static string ConnectionStringForMigrations(string connectionString) =>
+        new MySqlConnectionStringBuilder(connectionString) { AllowUserVariables = true }.ConnectionString;
 
     /// <summary>Strips <c>--</c> line comments and splits on <c>;</c> (no semicolons or "--" inside literals).</summary>
     internal static List<string> SplitSqlStatements(string sql)
