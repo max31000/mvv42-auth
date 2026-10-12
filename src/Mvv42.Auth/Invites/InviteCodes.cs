@@ -38,8 +38,17 @@ public static partial class InviteCodes
 
     private static readonly Dictionary<char, char> Lookalikes = new()
     {
-        ['А'] = 'A', ['В'] = 'B', ['Е'] = 'E', ['К'] = 'K', ['М'] = 'M', ['Н'] = 'H',
-        ['О'] = 'O', ['Р'] = 'P', ['С'] = 'C', ['Т'] = 'T', ['Х'] = 'X',
+        ['А'] = 'A',
+        ['В'] = 'B',
+        ['Е'] = 'E',
+        ['К'] = 'K',
+        ['М'] = 'M',
+        ['Н'] = 'H',
+        ['О'] = 'O',
+        ['Р'] = 'P',
+        ['С'] = 'C',
+        ['Т'] = 'T',
+        ['Х'] = 'X',
     };
 
     /// <summary>A new code, displayed as <c>XXXX-XXXX-XXXX</c> (60 random bits).</summary>
