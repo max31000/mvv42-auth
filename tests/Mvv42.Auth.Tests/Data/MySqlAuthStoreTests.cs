@@ -112,7 +112,7 @@ public class MySqlMigrationTests
         Assert.Equal(1, await Count(column, new { table = "users", name = "blocked_at" }));
         Assert.Equal(1, await Count(column, new { table = "sessions", name = "ip" }));
 
-        // 007/008 (closed registration), still right after being re-applied on top of themselves
+        // 007/008 (closed registration) and 009 (code-first login), still right after being re-applied on top of themselves
         var appId = await Dapper.SqlMapper.QuerySingleAsync<(string Nullable, string Type, string Collation)>(conn, """
             SELECT is_nullable, column_type, collation_name FROM information_schema.columns
             WHERE table_schema = DATABASE() AND table_name = 'invites' AND column_name = 'app_id'
@@ -122,7 +122,7 @@ public class MySqlMigrationTests
             SELECT is_nullable, column_type FROM information_schema.columns
             WHERE table_schema = DATABASE() AND table_name = 'login_events' AND column_name = 'result'
             """);
-        Assert.Equal(("NO", "enum('ok','denied_blocked','invalid','replayed','denied_unregistered')"), result);
+        Assert.Equal(("NO", "enum('ok','denied_blocked','invalid','replayed','denied_unregistered','invite_check_failed')"), result);
         // 007 keeps the invite → app foreign key (cascade on app delete/rename) on the now nullable column
         var fk = await Dapper.SqlMapper.QuerySingleAsync<(string Referenced, string OnDelete, string OnUpdate)>(conn, """
             SELECT referenced_table_name, delete_rule, update_rule FROM information_schema.referential_constraints

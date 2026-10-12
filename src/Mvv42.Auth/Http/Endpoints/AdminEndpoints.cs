@@ -51,8 +51,10 @@ public static partial class AdminEndpoints
     public sealed record OverviewApp(string Id, string Name, bool Anonymous, string Access, int GrantedUsers);
 
     /// <param name="DeniedUnregistered7d">Refused logins of unknown users (no/bad invite code) in the last 7 days.</param>
+    /// <param name="FailedInviteChecks7d">Codes refused by <c>POST /invites/check</c> in the last 7 days.</param>
     public sealed record Overview(
-        int Users, int ActiveSessions, int Logins24h, int Logins7d, int Blocked, int DeniedUnregistered7d, IReadOnlyList<OverviewApp> Apps);
+        int Users, int ActiveSessions, int Logins24h, int Logins7d, int Blocked, int DeniedUnregistered7d,
+        int FailedInviteChecks7d, IReadOnlyList<OverviewApp> Apps);
 
     public sealed record AdminInvite(
         long Id, string? AppId, int MaxUses, int Uses, DateTime? ExpiresAt, long? CreatedBy, DateTime CreatedAt, string Status);
@@ -272,6 +274,7 @@ public static partial class AdminEndpoints
             Logins7d: await store.CountLoginEventsAsync(now.AddDays(-7), LoginResult.Ok),
             Blocked: users.Count(u => u.IsBlocked),
             DeniedUnregistered7d: await store.CountLoginEventsAsync(now.AddDays(-7), LoginResult.DeniedUnregistered),
+            FailedInviteChecks7d: await store.CountLoginEventsAsync(now.AddDays(-7), LoginResult.InviteCheckFailed),
             Apps: apps.Select(a => new OverviewApp(a.Id, a.Name, a.Anonymous, a.Access, granted.GetValueOrDefault(a.Id))).ToList());
     }
 

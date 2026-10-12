@@ -4,7 +4,7 @@ namespace Mvv42.Auth.Sessions;
 
 /// <summary>
 /// Hourly removal of expired sessions, of sessions revoked more than a day ago (spec §9.2) and of login events
-/// older than 180 days (invalid/replayed/denied_unregistered ones: 7 days).
+/// older than 180 days (invalid/replayed/denied_unregistered/invite_check_failed ones: 7 days).
 /// </summary>
 public sealed class SessionCleanupService(IAuthStore store, TimeProvider time, ILogger<SessionCleanupService> logger)
     : BackgroundService
@@ -17,7 +17,7 @@ public sealed class SessionCleanupService(IAuthStore store, TimeProvider time, I
     public static readonly TimeSpan LoginEventRetention = TimeSpan.FromDays(180);
 
     /// <summary>
-    /// Failed attempts (bad signature, replay, refused registration) are noise after a week; ok/denied_blocked keep 180 days.
+    /// Failed attempts (bad signature, replay, refused registration, failed code check) are noise after a week; ok/denied_blocked keep 180 days.
     /// </summary>
     public static readonly TimeSpan FailedLoginEventRetention = TimeSpan.FromDays(7);
 
@@ -45,7 +45,7 @@ public sealed class SessionCleanupService(IAuthStore store, TimeProvider time, I
         if (deleted > 0)
             logger.LogInformation("Deleted {Count} stale sessions", deleted);
         var events = await store.DeleteLoginEventsBeforeAsync(now - LoginEventRetention)
-            + await store.DeleteLoginEventsBeforeAsync(now - FailedLoginEventRetention, LoginResult.Invalid, LoginResult.Replayed, LoginResult.DeniedUnregistered);
+            + await store.DeleteLoginEventsBeforeAsync(now - FailedLoginEventRetention, LoginResult.Invalid, LoginResult.Replayed, LoginResult.DeniedUnregistered, LoginResult.InviteCheckFailed);
         if (events > 0)
             logger.LogInformation("Deleted {Count} expired login events", events);
     }

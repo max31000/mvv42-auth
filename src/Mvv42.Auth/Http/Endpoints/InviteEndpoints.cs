@@ -8,6 +8,11 @@ public static class InviteEndpoints
 {
     public sealed record RedeemRequest(string? Code);
 
+    public sealed record CheckRequest(string? Code);
+
+    /// <param name="AppId">The app the invite grants; null = login-only invite.</param>
+    public sealed record CheckResponse(bool Valid, string? AppId);
+
     /// <summary><c>me</c> is the caller's <c>/me</c> payload after the grant; <c>appId</c> null = login-only invite.</summary>
     public sealed record RedeemResponse(string? AppId, bool AlreadyGranted, MeResponse Me);
 
@@ -19,7 +24,40 @@ public static class InviteEndpoints
     /// <c>invite_expired</c> / <c>invite_exhausted</c>; 401 without a token or for a blocked/deleted user.
     /// The code is normalised and looked up exactly as at registration (<see cref="InviteCodes"/>, <see cref="InviteCodeHasher"/>).
     /// </summary>
-    public static void MapInviteEndpoints(this RouteGroupBuilder api) =>
+    public static void MapInviteEndpoints(this RouteGroupBuilder api)
+    {
+        api.MapPost("/invites/check", Check).RequireRateLimiting(AuthEndpoints.RateLimitPolicy);
+        MapRedeem(api);
+    }
+
+    /// <summary>
+    /// POST /api/invites/check {code} — anonymous pre-check before the shell loads the Telegram widget (spec
+    /// "code-first login"). 200 <c>{ valid: true, appId }</c>; 400 <c>invalid_invite_format</c> / <c>invite_not_found</c> /
+    /// <c>invite_expired</c> / <c>invite_exhausted</c>. Same normalisation and lookup as registration and redeem, consumes
+    /// nothing and stores nothing on success; a refusal writes one <c>invite_check_failed</c> journal row with only the time.
+    /// </summary>
+    private static async Task<IResult> Check(
+        CheckRequest? body, HttpContext ctx, IAuthStore store, TimeProvider time, InviteCodeHasher hasher)
+    {
+        var now = time.GetUtcNow().UtcDateTime;
+        string? error;
+        Invite? invite = null;
+        if (InviteCodes.Parse(body?.Code) is not { } code)
+            error = "invalid_invite_format";
+        else if ((invite = await store.FindInviteAsync(hasher.Candidates(code))) is null)
+            error = "invite_not_found";
+        else if (invite.ExpiresAt <= now) // same order as RegisterWithInviteAsync
+            error = "invite_expired";
+        else if (invite.Uses >= invite.MaxUses)
+            error = "invite_exhausted";
+        else
+            return Results.Ok(new CheckResponse(Valid: true, invite.AppId));
+
+        await AuthEndpoints.LogLoginAsync(ctx, store, time, LoginResult.InviteCheckFailed, null, null, withClient: false);
+        return Bad(error);
+    }
+
+    private static void MapRedeem(RouteGroupBuilder api) =>
         api.MapPost("/invites/redeem", async (RedeemRequest body, HttpContext ctx, IAuthStore store,
             UserAccessService access, AuthCookies cookies, TimeProvider time, InviteCodeHasher hasher) =>
         {

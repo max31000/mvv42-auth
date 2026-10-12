@@ -126,6 +126,21 @@ public class HostingTests(AuthAppFactory factory) : IClassFixture<AuthAppFactory
     }
 
     [Fact]
+    public async Task InviteCheck_SharesThePerIpBudget()
+    {
+        var limited = factory.WithWebHostBuilder(b => b.UseSetting("Auth:RateLimitPerMinute", "2"));
+        var client = limited.CreateClient();
+        client.DefaultRequestHeaders.Add("Origin", AuthAppFactory.Origin);
+
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/auth/api/invites/check", new { code = "x" })).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/auth/api/refresh", null)).StatusCode);
+        var third = await client.PostAsJsonAsync("/auth/api/invites/check", new { code = "x" });
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
+        Assert.Equal("rate_limited", (await third.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("error").GetString());
+    }
+
+    [Fact]
     public async Task ForwardedProto_IsHonoured()
     {
         // Sanity check that the service sits behind nginx: X-Forwarded-* must not break routing.

@@ -420,6 +420,19 @@ public abstract class AuthStoreContractTests
                         - await Store.CountLoginEventsAsync(at.AddTicks(10), LoginResult.DeniedUnregistered));
     }
 
+    [Fact]
+    public async Task LoginEvents_InviteCheckFailed_IsStoredWithoutPii_AndCounted()
+    {
+        var at = new DateTime(1994, 4, 1, 0, 0, 0, DateTimeKind.Utc).AddMinutes(Random.Shared.Next(1_000_000));
+        var id = await Store.AddLoginEventAsync(new LoginEvent { At = at, Result = LoginResult.InviteCheckFailed });
+
+        var e = (await Store.ListLoginEventsAsync(null, id + 1, 1)).Single();
+        Assert.Equal((id, LoginResult.InviteCheckFailed), (e.Id, e.Result));
+        Assert.Equal((null, null, null, null, null), (e.UserId, e.TelegramId, e.Ip, e.UserAgent, e.UserName));
+        Assert.Equal(1, await Store.CountLoginEventsAsync(at, LoginResult.InviteCheckFailed)
+                        - await Store.CountLoginEventsAsync(at.AddTicks(10), LoginResult.InviteCheckFailed));
+    }
+
     // ---- admin extensions (migrations 003–006)
 
     [Fact]
