@@ -122,7 +122,7 @@ public class AdminAndInviteTests(AuthAppFactory factory) : IClassFixture<AuthApp
         var redeem = await user.PostAsJsonAsync("/auth/api/invites/redeem", new { code });
 
         Assert.Equal(HttpStatusCode.OK, redeem.StatusCode);
-        Assert.True(Granted(await Json(redeem), "invite_app"));
+        Assert.True(Granted((await Json(redeem)).GetProperty("me"), "invite_app"));
         Assert.Contains(redeem.Headers.GetValues("Set-Cookie"), c => c.StartsWith("mvv42_at="));
 
         var other = await UserAsync();
@@ -151,7 +151,11 @@ public class AdminAndInviteTests(AuthAppFactory factory) : IClassFixture<AuthApp
         var r = await admin.PutAsJsonAsync($"/auth/api/admin/users/{userId}/admin", new { isAdmin = true });
         Assert.Equal(HttpStatusCode.NoContent, r.StatusCode);
 
+        // is_admin unlocks access=admin apps on the next token, but not the admin API (owner only)
         await user.PostAsync("/auth/api/refresh", null);
-        Assert.Equal(HttpStatusCode.OK, (await user.GetAsync("/auth/api/admin/apps")).StatusCode);
+        var me = await Json(await user.GetAsync("/auth/api/me"));
+        Assert.True(me.GetProperty("user").GetProperty("isAdmin").GetBoolean());
+        Assert.True(Granted(me, "bonds"));
+        Assert.Equal(HttpStatusCode.Forbidden, (await user.GetAsync("/auth/api/admin/apps")).StatusCode);
     }
 }
