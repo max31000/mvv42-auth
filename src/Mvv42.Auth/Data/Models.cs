@@ -114,6 +114,12 @@ public static class LoginResult
     /// user id, telegram id, IP and User-Agent are NULL. Kept 7 days.
     /// </summary>
     public const string DeniedUnregistered = "denied_unregistered";
+
+    /// <summary>
+    /// <c>POST /invites/check</c> refused a code (bad format, unknown, expired, exhausted). Like
+    /// <see cref="DeniedUnregistered"/>, only the time is stored. Kept 7 days.
+    /// </summary>
+    public const string InviteCheckFailed = "invite_check_failed";
 }
 
 /// <summary>

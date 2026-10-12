@@ -181,7 +181,7 @@ public static class AuthEndpoints
     /// Best effort: a journal failure is logged and never fails the login itself. <paramref name="withClient"/> = false
     /// leaves IP and User-Agent out (refused strangers: only the time is stored).
     /// </summary>
-    private static async Task LogLoginAsync(
+    internal static async Task LogLoginAsync(
         HttpContext ctx, IAuthStore store, TimeProvider time, string result, long? userId, long? telegramId, bool withClient = true)
     {
         try

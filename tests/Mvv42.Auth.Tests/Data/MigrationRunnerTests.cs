@@ -93,6 +93,7 @@ public class MigrationRunnerTests
     [InlineData("006_login_events.sql", "CREATE TABLE IF NOT EXISTS login_events (")]
     [InlineData("007_invites_app_nullable.sql", "ALTER TABLE invites MODIFY app_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL")]
     [InlineData("008_login_events_unregistered.sql", "ALTER TABLE login_events MODIFY result ENUM(''ok'',''denied_blocked'',''invalid'',''replayed'',''denied_unregistered'') NOT NULL")]
+    [InlineData("009_login_events_invite_check.sql", "ALTER TABLE login_events MODIFY result ENUM(''ok'',''denied_blocked'',''invalid'',''replayed'',''denied_unregistered'',''invite_check_failed'') NOT NULL")]
     public void AdminMigrations_OneSchemaChangeEach(string fileName, string change)
     {
         var sql = string.Join('\n', MigrationRunner.SplitSqlStatements(ReadMigration(fileName)));
@@ -114,6 +115,7 @@ public class MigrationRunnerTests
     [Theory]
     [InlineData("007_invites_app_nullable.sql", "table_name = 'invites' AND column_name = 'app_id' AND is_nullable = 'NO'")]
     [InlineData("008_login_events_unregistered.sql", "table_name = 'login_events' AND column_name = 'result' AND column_type NOT LIKE '%denied_unregistered%'")]
+    [InlineData("009_login_events_invite_check.sql", "table_name = 'login_events' AND column_name = 'result' AND column_type NOT LIKE '%invite_check_failed%'")]
     public void ClosedRegistrationMigrations_AreGuarded(string fileName, string guard)
     {
         var statement = Assert.Single(MigrationRunner.SplitSqlStatements(ReadMigration(fileName)), s => s.StartsWith("SET @ddl", StringComparison.Ordinal));
