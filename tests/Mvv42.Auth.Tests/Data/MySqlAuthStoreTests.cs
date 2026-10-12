@@ -123,10 +123,16 @@ public class MySqlMigrationTests
             WHERE table_schema = DATABASE() AND table_name = 'login_events' AND column_name = 'result'
             """);
         Assert.Equal(("NO", "enum('ok','denied_blocked','invalid','replayed','denied_unregistered')"), result);
-        Assert.Equal(1, await Count("""
-            SELECT COUNT(*) FROM information_schema.referential_constraints
-            WHERE constraint_schema = DATABASE() AND table_name = @table AND constraint_name = @name
-            """, new { table = "invites", name = "fk_invites_app" }));
+        // 007 keeps the invite → app foreign key (cascade on app delete/rename) on the now nullable column
+        var fk = await Dapper.SqlMapper.QuerySingleAsync<(string Referenced, string OnDelete, string OnUpdate)>(conn, """
+            SELECT referenced_table_name, delete_rule, update_rule FROM information_schema.referential_constraints
+            WHERE constraint_schema = DATABASE() AND table_name = 'invites' AND constraint_name = 'fk_invites_app'
+            """);
+        Assert.Equal(("apps", "CASCADE", "CASCADE"), fk);
+        Assert.Equal(["app_id"], await Dapper.SqlMapper.QueryAsync<string>(conn, """
+            SELECT column_name FROM information_schema.key_column_usage
+            WHERE table_schema = DATABASE() AND table_name = 'invites' AND constraint_name = 'fk_invites_app'
+            """));
 
         var indexes = (await Dapper.SqlMapper.QueryAsync<(string Name, string Column, long Seq)>(conn, """
             SELECT index_name, column_name, seq_in_index FROM information_schema.statistics

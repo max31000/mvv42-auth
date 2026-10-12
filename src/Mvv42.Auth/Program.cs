@@ -88,8 +88,8 @@ builder.Services.AddSingleton(sp =>
     var t = sp.GetRequiredService<IOptions<TelegramOptions>>().Value;
     return new TelegramReplayCache(sp.GetRequiredService<IMemoryCache>(), t.AuthDateWindow + t.AuthDateFutureSkew + TimeSpan.FromMinutes(1));
 });
-builder.Services.AddSingleton(sp =>
-    new InviteCodeHasher(Path.GetFullPath(sp.GetRequiredService<IOptions<AuthOptions>>().Value.KeysPath)));
+builder.Services.AddSingleton(sp => new InviteCodeHasher(
+    Path.GetFullPath(sp.GetRequiredService<IOptions<AuthOptions>>().Value.KeysPath), sp.GetRequiredService<ILogger<InviteCodeHasher>>()));
 builder.Services.AddSingleton<AccessTokenIssuer>();
 builder.Services.AddSingleton<SessionService>();
 builder.Services.AddSingleton<UserAccessService>();

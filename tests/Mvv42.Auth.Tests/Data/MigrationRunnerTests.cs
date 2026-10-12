@@ -3,6 +3,11 @@ using Mvv42.Auth.Data;
 
 namespace Mvv42.Auth.Tests.Data;
 
+/// <summary>
+/// Pure checks of the embedded migrations. Also tagged MySql so the mysql-store CI job (filter Category=MySql) runs them
+/// next to the live re-apply test, not only the dotnet job.
+/// </summary>
+[Trait("Category", "MySql")]
 public class MigrationRunnerTests
 {
     [Fact]

@@ -1,5 +1,7 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
 using Mvv42.Auth.Sessions;
 
 namespace Mvv42.Auth.Invites;
@@ -18,11 +20,12 @@ public sealed class InviteCodeHasher
     private readonly byte[] _pepper;
 
     /// <exception cref="InvalidOperationException">The pepper file exists but is not exactly 32 bytes.</exception>
-    public InviteCodeHasher(string keysPath)
+    public InviteCodeHasher(string keysPath, ILogger? logger = null)
     {
         var path = Path.Combine(keysPath, PepperFileName);
-        if (!File.Exists(path))
-            Create(keysPath, path);
+        if (!File.Exists(path) && Create(keysPath, path, logger ?? NullLogger.Instance))
+            (logger ?? NullLogger.Instance).LogWarning(
+                "Created a new invite pepper {Path}: invite codes issued with any previous pepper can no longer be found", path);
 
         _pepper = File.ReadAllBytes(path);
         if (_pepper.Length != PepperLength)
@@ -47,8 +50,11 @@ public sealed class InviteCodeHasher
         return candidates;
     }
 
-    /// <summary>Same pattern as the signing keys: write <c>*.tmp</c> (0600), flush, rename; a lost race keeps the winner's file.</summary>
-    private static void Create(string keysPath, string path)
+    /// <summary>
+    /// Same pattern as the signing keys: write <c>*.tmp</c> (0600), fsync, rename, then fsync the directory (Linux) so
+    /// the rename survives a crash. A lost race keeps the winner's file. true = this call created the file.
+    /// </summary>
+    private static bool Create(string keysPath, string path, ILogger logger)
     {
         Directory.CreateDirectory(keysPath);
         var tmp = $"{path}.{Guid.NewGuid():N}.tmp";
@@ -68,6 +74,39 @@ public sealed class InviteCodeHasher
         catch (IOException) when (File.Exists(path))
         {
             File.Delete(tmp); // another process created it first: use theirs
+            return false;
+        }
+
+        if (OperatingSystem.IsLinux() && !SyncDirectory(keysPath))
+            logger.LogWarning("Could not fsync {Directory} after creating the invite pepper (errno {Errno})",
+                keysPath, Marshal.GetLastPInvokeError());
+        return true;
+    }
+
+    /// <summary>fsync of a directory (makes a rename in it durable). Linux only; false elsewhere or on failure.</summary>
+    internal static bool SyncDirectory(string directory)
+    {
+        if (!OperatingSystem.IsLinux())
+            return false;
+        var fd = Open(directory, 0 /* O_RDONLY */);
+        if (fd < 0)
+            return false;
+        try
+        {
+            return Fsync(fd) == 0;
+        }
+        finally
+        {
+            _ = Close(fd);
         }
     }
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int Open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+
+    [DllImport("libc", EntryPoint = "fsync", SetLastError = true)]
+    private static extern int Fsync(int fd);
+
+    [DllImport("libc", EntryPoint = "close")]
+    private static extern int Close(int fd);
 }

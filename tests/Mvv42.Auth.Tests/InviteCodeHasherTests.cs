@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Mvv42.Auth.Invites;
 using Mvv42.Auth.Sessions;
 
@@ -23,6 +24,26 @@ public class InviteCodeHasherTests : IDisposable
         Assert.Equal([InviteCodeHasher.PepperFileName], Directory.GetFiles(_dir.Path).Select(Path.GetFileName));
         if (!OperatingSystem.IsWindows())
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(PepperPath));
+    }
+
+    /// <summary>A new pepper is an operational event (a lost one makes every issued code unfindable): logged at Warning.</summary>
+    [Fact]
+    public void Creation_IsLoggedAtWarning_ReuseIsNot()
+    {
+        var log = new ListLogger();
+        _ = new InviteCodeHasher(_dir.Path, log);
+        _ = new InviteCodeHasher(_dir.Path, log);
+
+        var entry = Assert.Single(log.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Contains(InviteCodeHasher.PepperFileName, entry.Message);
+    }
+
+    /// <summary>The rename is made durable: the directory entry is fsync'ed (Linux; a no-op elsewhere).</summary>
+    [Fact]
+    public void SyncDirectory_SucceedsOnLinux()
+    {
+        Assert.Equal(OperatingSystem.IsLinux(), InviteCodeHasher.SyncDirectory(_dir.Path));
     }
 
     [Fact]
@@ -91,4 +112,16 @@ public class InviteCodeHasherTests : IDisposable
 
         Assert.Equal([SecretTokens.Sha256Hex("kq3Zp9_x-AbCdEfGhIjKlMn")], hasher.Candidates(code));
     }
+}
+
+public sealed class ListLogger : ILogger
+{
+    public List<(LogLevel Level, string Message)> Entries { get; } = [];
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(LogLevel logLevel) => true;
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        Entries.Add((logLevel, formatter(state, exception)));
 }
