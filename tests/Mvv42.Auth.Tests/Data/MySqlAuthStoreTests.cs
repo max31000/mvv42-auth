@@ -31,11 +31,22 @@ public sealed class MySqlStoreFixture : IAsyncLifetime
 }
 
 /// <summary>
+/// One fixture (migrations applied once) for every MySQL test class, and no parallelism between them: two fixtures
+/// racing on the migration bookkeeping, or a re-applied DDL under a running contract test, would be flaky.
+/// </summary>
+[CollectionDefinition(Name)]
+public sealed class MySqlCollection : ICollectionFixture<MySqlStoreFixture>
+{
+    public const string Name = "MySql";
+}
+
+/// <summary>
 /// Runs every <see cref="AuthStoreContractTests"/> fact against MySQL (CI service container, see ci.yml).
 /// Locally, without MySQL, the cases are reported as skipped.
 /// </summary>
 [Trait("Category", "MySql")]
-public class MySqlAuthStoreTests : IClassFixture<MySqlStoreFixture>
+[Collection(MySqlCollection.Name)]
+public class MySqlAuthStoreTests
 {
     // Private nested type: not discovered by xUnit itself, only invoked through the theory below.
     private sealed class MySqlContract : AuthStoreContractTests
@@ -81,7 +92,8 @@ public sealed class MySqlFactAttribute : FactAttribute
 /// every migration must apply cleanly on top of itself (spec §10.9).
 /// </summary>
 [Trait("Category", "MySql")]
-public class MySqlMigrationTests : IClassFixture<MySqlStoreFixture>
+[Collection(MySqlCollection.Name)]
+public class MySqlMigrationTests
 {
     [MySqlFact]
     public async Task EveryMigration_ReappliesOnTopOfItself_AndSchemaHasAdminColumnsAndIndexes()
