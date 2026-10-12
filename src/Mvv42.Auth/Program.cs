@@ -8,6 +8,7 @@ using Mvv42.Auth.Access;
 using Mvv42.Auth.Data;
 using Mvv42.Auth.Http;
 using Mvv42.Auth.Http.Endpoints;
+using Mvv42.Auth.Invites;
 using Mvv42.Auth.Keys;
 using Mvv42.Auth.Options;
 using Mvv42.Auth.Sessions;
@@ -87,6 +88,8 @@ builder.Services.AddSingleton(sp =>
     var t = sp.GetRequiredService<IOptions<TelegramOptions>>().Value;
     return new TelegramReplayCache(sp.GetRequiredService<IMemoryCache>(), t.AuthDateWindow + t.AuthDateFutureSkew + TimeSpan.FromMinutes(1));
 });
+builder.Services.AddSingleton(sp => new InviteCodeHasher(
+    Path.GetFullPath(sp.GetRequiredService<IOptions<AuthOptions>>().Value.KeysPath), sp.GetRequiredService<ILogger<InviteCodeHasher>>()));
 builder.Services.AddSingleton<AccessTokenIssuer>();
 builder.Services.AddSingleton<SessionService>();
 builder.Services.AddSingleton<UserAccessService>();
@@ -124,6 +127,7 @@ try
 {
     authOptions.AdminTelegramIdSet();
     authOptions.TrustedProxyNetworks();
+    authOptions.GetRegistrationMode();
 }
 catch (FormatException ex)
 {
@@ -131,6 +135,8 @@ catch (FormatException ex)
 }
 if (authOptions.RateLimitPerMinute < 1)
     throw new InvalidOperationException("Auth:RateLimitPerMinute must be positive.");
+foreach (var warning in authOptions.StartupWarnings())
+    app.Logger.LogWarning("{Warning}", warning);
 
 // Outside Development/Testing the service must not start half-configured.
 if (!app.Environment.IsDevelopment() && !app.Environment.IsEnvironment("Testing"))
@@ -146,8 +152,9 @@ if (string.IsNullOrWhiteSpace(connectionString))
 else
     await app.Services.GetRequiredService<MigrationRunner>().RunAsync();
 
-// Generate the first signing key at startup rather than on the first request.
+// Generate the first signing key and the invite pepper at startup rather than on the first request.
 app.Services.GetRequiredService<SigningKeyStore>().GetSigningKey();
+app.Services.GetRequiredService<InviteCodeHasher>();
 
 app.UseForwardedHeaders();
 

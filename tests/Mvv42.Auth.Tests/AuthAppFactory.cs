@@ -17,6 +17,12 @@ public class AuthAppFactory : WebApplicationFactory<Program>
 
     private readonly TempDir _keys = new();
 
+    /// <summary>
+    /// <c>Auth:Registration</c>. <c>open</c> here so tests can log arbitrary new users in; null leaves the service
+    /// default (<c>invite</c>, see <c>InviteAuthAppFactory</c>).
+    /// </summary>
+    protected virtual string? Registration => "open";
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
@@ -26,6 +32,8 @@ public class AuthAppFactory : WebApplicationFactory<Program>
         builder.UseSetting("Auth:SecureCookies", "false");
         builder.UseSetting("Telegram:BotToken", BotToken);
         builder.UseSetting("Auth:RateLimitPerMinute", "100000"); // tests share one (null) remote IP
+        if (Registration is not null)
+            builder.UseSetting("Auth:Registration", Registration);
     }
 
     /// <summary>Client with a cookie container and a same-origin Origin header (as a browser fetch would send).</summary>

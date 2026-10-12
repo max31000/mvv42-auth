@@ -14,10 +14,11 @@
 | Публичный путь | nginx (`mvv42-infra/nginx/apps/auth.conf`): `location ^~ /auth/ { proxy_pass http://127.0.0.1:5010; }` плюс три exact-location с `limit_req` (`location = /auth/api/telegram`, `= /auth/api/refresh`, `= /auth/api/invites/redeem`) — префикс не режется, сервис делает `UsePathBase("/auth")` |
 | Access | JWT ES256, 10 мин, `iss=https://mvv42.ru/auth`, `aud=mvv42`, claims `sub tg name adm apps`, `kid` = RFC 7638 thumbprint. Cookie `__Host-mvv42_at` (HttpOnly, Secure, SameSite=Strict, Path=/) |
 | Refresh | 32 случайных байта, в БД только SHA-256. Cookie `__Secure-mvv42_rt` (Path=/auth/api, Strict). Ротация на каждый refresh; повтор предыдущего токена < 30 с — гонка (только новый access), позже (или любой более старый токен из `refresh_token_history`) — отзыв семьи. Скользящие 30 дней, абсолютно 90 дней |
-| Ключи | PEM `es256-yyyyMMddHHmmss.pem` в `Auth__KeysPath` (volume). Первый генерируется при старте. Новый ключ сразу в JWKS, подписывает через 15 мин. Запись атомарная (`.tmp` → rename); нечитаемые, не P-256 и public-only файлы пропускаются с ошибкой в логе |
+| Ключи | PEM `es256-yyyyMMddHHmmss.pem` в `Auth__KeysPath` (volume). Первый генерируется при старте. Новый ключ сразу в JWKS, подписывает через 15 мин. Запись атомарная (`.tmp` → rename); нечитаемые, не P-256 и public-only файлы пропускаются с ошибкой в логе. Там же `invite-pepper` (32 байта, 0600, создаётся при первом старте) — ключ HMAC для хэшей инвайт-кодов; потеря файла = все выданные новые коды перестают находиться |
 | CSRF | SameSite=Strict + для POST/PUT/PATCH/DELETE обязателен `Origin`/`Referer` из `Auth__AllowedOrigins` |
 | Защита | rate limit на IP (`/telegram`, `/refresh`, `/invites/redeem`) поверх nginx `limit_req`; payload виджета принимается один раз (replay-кэш); `X-Forwarded-*` только от доверенного прокси |
 | Доступ | таблица `apps(id, name, anonymous, access)`, `access ∈ public/invite/admin`; гранты по инвайтам; админ = `users.is_admin` ИЛИ `Auth__AdminTelegramIds` |
+| Регистрация | закрытая (`Auth__Registration=invite`): новый пользователь входит только с кодом приглашения (заголовок `X-Invite-Code`), о постороннем ничего не хранится — см. [docs/api.md](docs/api.md) |
 | Хранилище | MySQL (`mvv42_auth` в контейнере `cashpulse-mysql`), Dapper, SQL-миграции из `Data/Migrations` при старте |
 
 Структура: один веб-проект `src/Mvv42.Auth` (`Telegram/`, `Keys/`, `Tokens/`, `Sessions/`, `Access/`, `Data/`, `Http/`),
@@ -37,9 +38,12 @@
 | `Auth__SecureCookies` | нет | `true`; в `appsettings.Development.json` — `false` (cookie `mvv42_at`/`mvv42_rt` без префиксов и без Secure для http://localhost) |
 | `Auth__TrustedProxyCidrs` | нет | `172.16.0.0/12`; deploy пишет точный gateway сети: `172.18.0.1/32` (см. ниже) |
 | `Auth__RateLimitPerMinute` | нет | `30` — лимит на IP для `/telegram`, `/refresh`, `/invites/redeem` (за nginx `limit_req`) |
+| `Auth__Registration` | нет | `invite` — новые пользователи только по инвайт-коду (владельцы из `Auth__AdminTelegramIds` — всегда); `open` — любой, кто вошёл через Telegram (старое поведение; валидный код в заголовке при этом погашается) |
 
 Вне Development/Testing сервис не стартует без `Telegram__BotToken` и `ConnectionStrings__Auth`. В любом окружении
-не стартует с кривыми `Auth__AdminTelegramIds` (не положительные целые) или `Auth__TrustedProxyCidrs`.
+не стартует с кривыми `Auth__AdminTelegramIds` (не положительные целые), `Auth__TrustedProxyCidrs`, неизвестным
+`Auth__Registration` или `invite-pepper` не из 32 байт. `invite` с пустым `Auth__AdminTelegramIds` — warning в лог
+(инвайты создавать некому).
 
 **Строка подключения.** Обычная строка MySqlConnector (ключи как в примере). Стор сам фиксирует нужную семантику
 поверх того, что задано: `GuidFormat=None` (иначе MySqlConnector читает любой `CHAR(36)`, в т.ч. `family_id`, как `Guid`

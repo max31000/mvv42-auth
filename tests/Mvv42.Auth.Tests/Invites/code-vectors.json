@@ -1,0 +1,175 @@
+[
+  {
+    "input": "K7PM-2XQ9-HD4T",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "canonical"
+  },
+  {
+    "input": "K7PM2XQ9HD4T",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "no dashes"
+  },
+  {
+    "input": "k7pm-2xq9-hd4t",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "lower case"
+  },
+  {
+    "input": "  K7PM 2XQ9  HD4T \n",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "spaces, padding, newline"
+  },
+  {
+    "input": "\tK7PM\t2XQ9\r\nHD4T",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "tab, CRLF"
+  },
+  {
+    "input": "\u00a0K7PM\u00a02XQ9\u202fHD4T\u3000",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "NBSP, narrow NBSP, ideographic space"
+  },
+  {
+    "input": "\ufeffK7PM\u200b2XQ9\u2003HD4T",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "BOM, zero-width space, em space"
+  },
+  {
+    "input": "K7PM\u20132XQ9\u2014HD4T",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "en / em dash"
+  },
+  {
+    "input": "K7PM\u22122XQ9\u2011HD4T",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "minus sign, non-breaking hyphen"
+  },
+  {
+    "input": "K7PM\u20102XQ9\u2015HD4T",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "hyphen U+2010, horizontal bar U+2015"
+  },
+  {
+    "input": "KOPM-2XQ9-HD4T",
+    "result": "normalized",
+    "value": "K0PM2XQ9HD4T",
+    "note": "Crockford O -> 0"
+  },
+  {
+    "input": "KIPM-2XQ9-HDLT",
+    "result": "normalized",
+    "value": "K1PM2XQ9HD1T",
+    "note": "Crockford I, L -> 1"
+  },
+  {
+    "input": "kopm-2xq9-hdit",
+    "result": "normalized",
+    "value": "K0PM2XQ9HD1T",
+    "note": "lower-case o, i, l"
+  },
+  {
+    "input": "\u0410\u0412\u0415\u041a-\u041c\u041d\u041e\u0420-\u0421\u0422\u04252",
+    "result": "normalized",
+    "value": "ABEKMH0PCTX2",
+    "note": "Cyrillic upper look-alikes"
+  },
+  {
+    "input": "\u0430\u0432\u0435\u043a-\u043c\u043d\u043e\u0440-\u0441\u0442\u04452",
+    "result": "normalized",
+    "value": "ABEKMH0PCTX2",
+    "note": "Cyrillic lower look-alikes"
+  },
+  {
+    "input": "\u041a7\u0420\u041c-2\u0425Q9-\u041dD4\u0422",
+    "result": "normalized",
+    "value": "K7PM2XQ9HD4T",
+    "note": "mixed Cyrillic and Latin"
+  },
+  {
+    "input": "kQ7vX2mP9aLr4TzW_8-bNc3Y",
+    "result": "legacy",
+    "value": "kQ7vX2mP9aLr4TzW_8-bNc3Y",
+    "note": "legacy base64url as is"
+  },
+  {
+    "input": "  kQ7vX2mP9aLr4TzW_8-bNc3Y ",
+    "result": "legacy",
+    "value": "kQ7vX2mP9aLr4TzW_8-bNc3Y",
+    "note": "legacy, trimmed"
+  },
+  {
+    "input": "",
+    "result": "invalid",
+    "note": "empty"
+  },
+  {
+    "input": "   ",
+    "result": "invalid",
+    "note": "blank"
+  },
+  {
+    "input": "K7PM-2XQ9-HD4",
+    "result": "invalid",
+    "note": "too short (11)"
+  },
+  {
+    "input": "K7PM-2XQ9-HD4TT",
+    "result": "invalid",
+    "note": "too long (13)"
+  },
+  {
+    "input": "U7PM-2XQ9-HD4T",
+    "result": "invalid",
+    "note": "U is not Crockford"
+  },
+  {
+    "input": "K7PM.2XQ9.HD4T",
+    "result": "invalid",
+    "note": "punctuation"
+  },
+  {
+    "input": "\u0416\u0416\u0416\u0416-\u0416\u0416\u0416\u0416-\u0416\u0416\u0416\u0416",
+    "result": "invalid",
+    "note": "non-look-alike Cyrillic"
+  },
+  {
+    "input": "abc_def-123",
+    "result": "invalid",
+    "note": "short legacy-looking token"
+  },
+  {
+    "input": "kQ7vX2mP9aLr 4TzW_8-bNc3Y",
+    "result": "invalid",
+    "note": "legacy with a space inside"
+  },
+  {
+    "input": "K7PM-2XQ9-HD4\ud83d\ude42",
+    "result": "invalid",
+    "note": "emoji"
+  },
+  {
+    "input": "K7PM-2XQ9-HD\u00df",
+    "result": "invalid",
+    "note": "sharp s is not upper-cased to SS"
+  },
+  {
+    "input": "K7PM-2XQ9-HD\ufb01",
+    "result": "invalid",
+    "note": "fi ligature is not expanded"
+  },
+  {
+    "input": "K7PM-2XQ9-HD4\u0442\u0442",
+    "result": "invalid",
+    "note": "Cyrillic padding makes it 13"
+  }
+]

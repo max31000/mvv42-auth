@@ -77,8 +77,11 @@ public sealed record Session
 public sealed record Invite
 {
     public long Id { get; init; }
+    /// <summary>HMAC-SHA256 of the normalised code (new codes) or SHA-256 of the raw code (legacy), hex.</summary>
     public string CodeHash { get; init; } = "";
-    public string AppId { get; init; } = "";
+
+    /// <summary>App granted on use; null = login-only invite (registration without a grant).</summary>
+    public string? AppId { get; init; }
     public int MaxUses { get; init; } = 1;
     public int Uses { get; init; }
     public DateTime? ExpiresAt { get; init; }
@@ -105,6 +108,12 @@ public static class LoginResult
     public const string DeniedBlocked = "denied_blocked";
     public const string Invalid = "invalid";
     public const string Replayed = "replayed";
+
+    /// <summary>
+    /// Unknown telegram user refused by the closed registration (no code, bad code). Stores <b>nothing</b> but the time:
+    /// user id, telegram id, IP and User-Agent are NULL. Kept 7 days.
+    /// </summary>
+    public const string DeniedUnregistered = "denied_unregistered";
 }
 
 /// <summary>
@@ -136,5 +145,21 @@ public enum InviteRedeemStatus
     Exhausted,
 }
 
-/// <param name="AppId">The invite's app; null only for <see cref="InviteRedeemStatus.NotFound"/>.</param>
+/// <param name="AppId">The invite's app; null for <see cref="InviteRedeemStatus.NotFound"/> and for a login-only invite.</param>
 public sealed record InviteRedeemResult(InviteRedeemStatus Status, string? AppId);
+
+public enum InviteRegistrationStatus
+{
+    /// <summary>User created, one use consumed, the invite's app granted (if any).</summary>
+    Registered,
+
+    /// <summary>The telegram id already has a user (e.g. a parallel request won): nothing changed, no use consumed.</summary>
+    AlreadyRegistered,
+    NotFound,
+    Expired,
+    Exhausted,
+}
+
+/// <param name="User">The new user, only for <see cref="InviteRegistrationStatus.Registered"/>.</param>
+/// <param name="AppId">The granted app, only for <see cref="InviteRegistrationStatus.Registered"/> (null = login-only invite).</param>
+public sealed record InviteRegistrationResult(InviteRegistrationStatus Status, User? User, string? AppId);

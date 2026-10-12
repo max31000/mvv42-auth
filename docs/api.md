@@ -24,14 +24,17 @@
 | `InvalidHash` / `Expired` / `FromFuture` | 401 | `/telegram`: подпись / окно `auth_date` |
 | `Replayed` | 401 | `/telegram`: этот же payload виджета (тот же `hash`) уже использован |
 | `user_blocked` | 403 | `/telegram`: пользователь заблокирован владельцем |
+| `invite_required` | 403 | `/telegram`: новый пользователь (закрытая регистрация) без заголовка `X-Invite-Code` |
+| `invalid_invite_format` | 400 | `/telegram`: новый пользователь, код в `X-Invite-Code` не прошёл нормализацию |
+| `invite_not_found` / `invite_expired` / `invite_exhausted` | 400 | `/telegram`: новый пользователь, код неизвестен / истёк / исчерпан |
 | `telegram_not_configured` | 503 | `/telegram`: нет `Telegram__BotToken` (возможно только в Development) |
 | `invalid_refresh_token` | 401 | `/refresh`: нет cookie, неизвестный/истёкший/отозванный токен, reuse (семья отозвана), пользователь удалён или заблокирован; cookies удаляются |
-| `invite_not_found` | 400 | `/invites/redeem`: пустой или неизвестный код |
+| `invite_not_found` | 400 | `/invites/redeem`: пустой, неизвестный или не прошедший нормализацию код |
 | `invite_expired` / `invite_exhausted` | 400 | `/invites/redeem`: срок истёк / использования кончились (если грант уже есть — это не ошибка, см. ниже) |
 | `origin_not_allowed` | 403 | любой небезопасный метод под `/auth/api/` с чужим `Origin` или без него |
 | `rate_limited` | 429 | `/telegram`, `/refresh`, `/invites/redeem` |
-| `invalid_app_id` / `invalid_name` / `invalid_access` | 400 | `PUT /admin/apps/{id}` |
-| `unknown_user` / `unknown_app` | 400 | `POST /admin/grants`; `unknown_app` также `POST /admin/invites` |
+| `invalid_app_id` / `invalid_name` / `invalid_access` | 400 | `PUT /admin/apps/{id}`; `invalid_app_id` также `POST /admin/invites` без поля `appId` или с не-строкой/не-`null` |
+| `unknown_user` / `unknown_app` | 400 | `POST /admin/grants`; `unknown_app` также `POST /admin/invites` (`appId` — `""` или нет такого приложения) |
 | `invalid_max_uses` / `invalid_expiry` | 400 | `POST /admin/invites` (`maxUses` 1…1000, `expiresInHours` 1…8760) |
 | `user_not_found` | 404 | `GET /admin/users/{id}`, `PUT /admin/users/{id}/admin`, `PUT /admin/users/{id}/blocked`, `POST /admin/users/{id}/revoke-sessions` |
 | `cannot_block_owner` | 400 | `PUT /admin/users/{id}/blocked` с `blocked: true` для владельца |
@@ -63,27 +66,69 @@ access-JWT заблокированного пользователя прини�
 ## Эндпоинты
 
 ### `POST /auth/api/telegram`
-Тело — объект Telegram Login Widget как есть: `{id, first_name, last_name?, username?, photo_url?, auth_date, hash}`.
-В data-check-string идут только присланные поля (null отбрасывается), окно `auth_date` — 1 ч (+60 с в будущее).
+Тело — объект Telegram Login Widget как есть: `{id, first_name, last_name?, username?, photo_url?, auth_date, hash}`
+(HMAC считается только по нему). В data-check-string идут только присланные поля (null отбрасывается), окно
+`auth_date` — 1 ч (+60 с в будущее). Необязательный заголовок **`X-Invite-Code`** — код приглашения для первого входа
+(только ASCII; формат и нормализация — см. «Инвайт-коды»).
+
+**Закрытая регистрация** (`Auth__Registration=invite`, по умолчанию). Порядок проверок: подпись/свежесть → replay →
+блокировка → «известный ли пользователь» (есть строка `users` с этим `telegram_id` **или** id в
+`Auth__AdminTelegramIds`). Известный — обычный вход, `X-Invite-Code` игнорируется (shell сам вызывает
+`/invites/redeem`, если код был введён). Неизвестный:
+- нет заголовка (или пустой) → `403 invite_required`;
+- код не прошёл нормализацию → `400 invalid_invite_format`;
+- код не найден / истёк / исчерпан → `400 invite_not_found` / `invite_expired` / `invite_exhausted`;
+- код действителен → **одна транзакция**: инвайт под `SELECT … WHERE code_hash IN (…) FOR UPDATE`, проверка
+  срока/использований, `INSERT` пользователя, `uses + 1`, грант на `appId` инвайта (если не `null`); дальше обычный вход,
+  в ответе поле `invite`. Если в этот момент строка с тем же `telegram_id` уже появилась (параллельный запрос) — откат,
+  использование **не** списывается, пользователь считается известным (поля `invite` в ответе нет) — но только если эту
+  строку удаётся перечитать; иначе `403 invite_required` (пользователь заново не создаётся).
+
+При `invite_required`, `invalid_invite_format` и `invite_*` payload виджета **не** помечается использованным: shell
+повторно отправляет те же данные с кодом без нового клика в Telegram (пока не истекло окно `auth_date` в 1 ч; потом —
+`401 Expired`, нужно нажать кнопку Telegram ещё раз). Так возвращается **не более 5 раз** на один payload: шестой отказ
+оставляет его использованным, дальше — `401 Replayed` (новый клик в Telegram). Два параллельных запроса с одним payload — ровно один успех
+(второй — `401 Replayed`). О постороннем **ничего не сохраняется**: пользователь не создаётся, в журнал пишется строка
+`denied_unregistered`, в которой `userId`, `telegramId`, `ip`, `userAgent` = `null` (только время).
+
+`Auth__Registration=open` — старое поведение: неизвестный пользователь создаётся при входе. Если при этом передан
+действительный код — он погашается как при регистрации (грант + `invite` в ответе), невалидный/неизвестный код
+игнорируется. Удалённый владельцем пользователь — снова посторонний (нужен новый инвайт).
+
+Выкат: сначала auth, сразу следом shell (до обновления shell посторонний видит общую ошибку входа). Инвайты с
+`appId: null` создаёт только новая админка, поэтому старый shell их в списке не встретит.
+
+```ts
+type TelegramLoginResponse = Me & {
+  invite?: { appId: string | null };   // только если этот вход зарегистрировал пользователя по коду; null — «только вход»
+};
+```
+`invite` есть только в ответе `/telegram` (у `/me` и в `me` ответа redeem его нет). Shell различает ошибки по
+`{error}`, а не по статусу.
 
 | Ответ | Когда |
 |---|---|
-| 200 + обе cookie + тело как у `/me` | ок (предыдущая сессия этого браузера отзывается) |
+| 200 + обе cookie + `TelegramLoginResponse` | ок (предыдущая сессия этого браузера отзывается) |
 | 400 `MissingHash` / `MissingAuthDate` / `MissingId` / `invalid_body` | кривой запрос |
+| 400 `invalid_invite_format` | новый пользователь: код не прошёл нормализацию |
+| 400 `invite_not_found` / `invite_expired` / `invite_exhausted` | новый пользователь: код неизвестен / срок истёк / `uses = maxUses` |
 | 401 `InvalidHash` / `Expired` / `FromFuture` | проверка не прошла |
 | 401 `Replayed` | payload с этим `hash` уже обменян на сессию (кэш в памяти на время окна `auth_date`) |
-| 403 `user_blocked` | пользователь заблокирован; проверка **до** обновления профиля, сессия не создаётся |
-| 429 `rate_limited` | см. Rate limit |
+| 403 `user_blocked` | пользователь заблокирован; проверка **до** обновления профиля и до инвайта, сессия не создаётся |
+| 403 `invite_required` | новый пользователь без `X-Invite-Code` (закрытая регистрация) |
+| 429 `rate_limited` | см. Rate limit (он же ограничивает перебор кодов) |
 | 503 `telegram_not_configured` | нет `Telegram__BotToken` (только dev) |
 
 Булевы поля виджета (если придут JSON `true`/`false`) входят в data-check-string как `true`/`false`.
 
 **Журнал входов** (`login_events`, админка → `GET /admin/logins`): каждая попытка после разбора тела —
 `ok`, `denied_blocked` (с `userId`/`telegramId`), `invalid` (любая ошибка проверки: `Missing*`, `InvalidHash`, `Expired`,
-`FromFuture`), `replayed`. Для `invalid`/`replayed` `telegramId` и `userId` **не сохраняются** (id не проверен).
-Плюс IP (после `X-Forwarded-For` от доверенного прокси; IPv4-mapped IPv6 `::ffff:a.b.c.d` пишется как `a.b.c.d`) и
-User-Agent. Тот же IP пишется в `sessions.ip`. `invalid_body` и `telegram_not_configured` не журналируются.
-Часовая фоновая очистка удаляет `invalid`/`replayed` старше 7 дней, остальные — старше 180 дней. Запись в журнал —
+`FromFuture`), `replayed`, `denied_unregistered` (отказ новому пользователю: `invite_required`, `invalid_invite_format`,
+`invite_*`). Для `invalid`, `replayed` и `denied_unregistered` за попыткой нет проверенной личности: `telegramId`,
+`userId`, IP и User-Agent **не сохраняются** — только время и результат. Для `ok`/`denied_blocked` — IP (после
+`X-Forwarded-For` от доверенного прокси; IPv4-mapped IPv6 `::ffff:a.b.c.d` пишется как `a.b.c.d`) и User-Agent. Тот же
+IP пишется в `sessions.ip`. `invalid_body` и `telegram_not_configured` не журналируются.
+Часовая фоновая очистка удаляет `invalid`/`replayed`/`denied_unregistered` старше 7 дней, остальные — старше 180 дней. Запись в журнал —
 best effort: её сбой логируется и **не** ломает вход.
 
 ### `POST /auth/api/refresh`
@@ -129,17 +174,41 @@ invalid_refresh_token`. Повтор `/logout` безопасен (идемпо�
 ### `POST /auth/api/invites/redeem`
 Нужен access-cookie любого залогиненного (не заблокированного) пользователя. `{ "code": "…" }` →
 `200 { "appId": "…", "alreadyGranted": false, "me": <тело как у /me> }` и **сразу переизданный** access-cookie.
+Код нормализуется и ищется так же, как при регистрации (см. «Инвайт-коды»).
 Если пользователь **уже** может пользоваться приложением (явный грант, `public`-приложение, админ/владелец) — `200` с
-`alreadyGranted: true`, использование не списывается (даже если инвайт уже истёк или исчерпан). Shell строит ссылку `https://mvv42.ru/?invite=<code>`.
+`alreadyGranted: true`, использование не списывается (даже если инвайт уже истёк или исчерпан). Инвайт «только вход»
+(`appId: null`) залогиненному давать нечего: `200 { "appId": null, "alreadyGranted": true, "me": … }`, использование не
+списывается. Shell строит ссылку `https://mvv42.ru/?invite=<code>`.
+
+```ts
+type RedeemResponse = { appId: string | null; alreadyGranted: boolean; me: Me };
+```
 
 | Ответ | Когда |
 |---|---|
-| `400 invite_not_found` | пустой или неизвестный код (в т.ч. удалённый инвайт) |
+| `400 invite_not_found` | пустой, неизвестный (в т.ч. удалённый инвайт) или не прошедший нормализацию код |
 | `400 invite_expired` | `expiresAt` прошёл |
 | `400 invite_exhausted` | `uses = maxUses` |
 | `401` (пустое тело) | нет access-cookie или он истёк — клиент делает `/refresh` и повторяет (это делает `mvv42Fetch`); пользователь удалён или заблокирован |
 | `403 origin_not_allowed` | access-cookie есть, но `Origin`/`Referer` не из `Auth__AllowedOrigins` |
 | `429 rate_limited` | см. Rate limit |
+
+### Инвайт-коды
+Новые коды — 12 символов Crockford base32 (`0-9` и `A-Z` без `I L O U`, ~60 бит), показываются как `XXXX-XXXX-XXXX`.
+**Нормализация** (shell делает то же самое перед отправкой; общие тест-векторы — `portalShell/src/invite/code-vectors.json`,
+копия в тестах auth): trim пробельных символов → посимвольно: удалить пробельные и тире, кириллические двойники в
+латиницу (`А В Е К М Н О Р С Т Х` и строчные → `A B E K M H O P C T X`), ASCII `a–z` → `A–Z` (никакого культурного или
+полного Unicode-преобразования регистра: `ß`, `ﬁ` остаются и дают неверный формат) → Crockford `O→0`, `I/L→1` →
+результат должен совпасть с `^[0-9A-HJKMNP-TV-Z]{12}$`. Пробельные: пробел, `\t \n \r`, U+00A0, U+2000–U+200B, U+202F,
+U+205F, U+3000, U+FEFF. Тире: `-`, U+2010–U+2015, U+2212. Не совпал, но исходная (обрезанная) строка похожа на старый
+base64url-код (`^[A-Za-z0-9_-]{20,}$`) — используется как есть. Иначе формат неверный (`/telegram` → `400
+invalid_invite_format`, redeem → `400 invite_not_found`).
+**Хранение:** только хэш. Новые коды — `HMAC-SHA256(pepper, нормализованный код)`, pepper — 32 байта из файла
+`Auth__KeysPath/invite-pepper` (создаётся атомарно при первом старте: `.tmp` 0600 → fsync → rename → fsync каталога;
+создание пишется в лог как warning; его потеря делает все выданные новые коды ненаходимыми). Поиск — одним запросом
+`code_hash IN (…)`: HMAC нормализованного кода и, только если обрезанная исходная строка сама похожа на старый код
+(`^[A-Za-z0-9_-]{20,}$`), старый `SHA-256(исходная строка)` (коды, выданные до закрытой регистрации, продолжают
+работать); при нескольких совпадениях выигрывает HMAC.
 
 ### `GET /auth/.well-known/jwks.json`
 `{"keys":[{"kty":"EC","crv":"P-256","x":"…","y":"…","kid":"…","alg":"ES256","use":"sig"}]}`, `Cache-Control: public, max-age=300`.
@@ -172,9 +241,12 @@ type AdminUser = { id: number; telegramId: number; name: string; username: strin
 type AdminSession = { id: number; createdAt: string; lastUsedAt: string | null; expiresAt: string;
   userAgent: string | null; ip: string | null };
 type LoginEvent = { id: number; at: string; userId: number | null; telegramId: number | null; userName: string | null;
-  ip: string | null; userAgent: string | null; result: 'ok' | 'denied_blocked' | 'invalid' | 'replayed' };
+  ip: string | null; userAgent: string | null;
+  result: 'ok' | 'denied_blocked' | 'invalid' | 'replayed' | 'denied_unregistered' };  // denied_unregistered: всё null, кроме id/at/result
 type AdminApp = { id: string; name: string; anonymous: boolean; access: 'public' | 'invite' | 'admin' };
-type AdminInvite = { id: number; appId: string; maxUses: number; uses: number;
+type AdminInvite = { id: number;
+  appId: string | null;        // null — «только вход» (регистрация без гранта)
+  maxUses: number; uses: number;
   expiresAt: string | null;    // API всегда ставит срок; null — только у строк, созданных вручную (такой не истекает)
   createdBy: number | null; createdAt: string;
   status: 'active' | 'expired' | 'exhausted' };   // exhausted важнее expired
@@ -184,7 +256,7 @@ type AdminInvite = { id: number; appId: string; maxUses: number; uses: number;
 
 | Метод + путь | Тело → ответ |
 |---|---|
-| `GET /overview` | `{ users, activeSessions, logins24h, logins7d, blocked, apps: (AdminApp & { grantedUsers })[] }`. `logins*` — входы с `result=ok` за 24 ч / 7 дней; `grantedUsers` — сколько незаблокированных пользователей имеют доступ к приложению (как `granted` в `/me`: `public` — все, `invite` — по гранту + админы, `admin` — админы) |
+| `GET /overview` | `{ users, activeSessions, logins24h, logins7d, blocked, deniedUnregistered7d, apps: (AdminApp & { grantedUsers })[] }`. `logins*` — входы с `result=ok` за 24 ч / 7 дней; `deniedUnregistered7d` — попыток входа без приглашения (`result=denied_unregistered`) за 7 дней; `grantedUsers` — сколько незаблокированных пользователей имеют доступ к приложению (как `granted` в `/me`: `public` — все, `invite` — по гранту + админы, `admin` — админы) |
 | `GET /users` | `AdminUser[]` (по `id`) |
 | `GET /users/{id}` | `{ user: AdminUser, sessions: AdminSession[], logins: LoginEvent[] }` — активные сессии (новые первыми), последние 50 входов (по времени, новые первыми) · 404 `user_not_found` |
 | `PUT /users/{id}/admin` | `{ isAdmin }` → 204 · 404 `user_not_found` · 400 `cannot_change_owner` |
@@ -199,7 +271,7 @@ type AdminInvite = { id: number; appId: string; maxUses: number; uses: number;
 | `POST /grants` | `{ userId, appId }` → 204 · 400 `unknown_user` / `unknown_app` |
 | `DELETE /grants/{userId}/{appId}` | → 204 / 404 (пустое тело) |
 | `GET /invites` | `AdminInvite[]` (без кодов) |
-| `POST /invites` | `{ appId, maxUses = 1, expiresInHours = 168 }` → `{ id, code, appId, maxUses, expiresAt }` — код показывается **один раз** (хранится только SHA-256) · 400 `unknown_app` / `invalid_max_uses` / `invalid_expiry` |
+| `POST /invites` | `{ appId: string \| null, maxUses = 1, expiresInHours = 168 }` → `{ id, code, appId, maxUses, expiresAt }`. `appId` **обязателен**: id приложения или явный `null` («только вход»: регистрация без гранта). `code` — `XXXX-XXXX-XXXX`, показывается **один раз** (хранится только HMAC, см. «Инвайт-коды») · 400 `invalid_app_id` (нет поля, не строка и не `null`) / `unknown_app` (`""` или нет такого приложения) / `invalid_max_uses` / `invalid_expiry` |
 | `DELETE /invites/{id}` | → 204 · 404 `invite_not_found` |
 
 ## Модель сессий (для понимания поведения)
@@ -209,7 +281,7 @@ type AdminInvite = { id: number; appId: string; maxUses: number; uses: number;
 Повторное предъявление *предыдущего* токена различается по `rotated_at` (grace 30 с / reuse). Хеш, который есть только в
 истории (старше предыдущего), — всегда reuse, отзыв семьи.
 Фоновая служба раз в час удаляет истёкшие сессии и отозванные более суток назад вместе с их историей (FK `ON DELETE CASCADE`),
-а также записи `login_events` старше 180 дней (`invalid`/`replayed` — старше 7 дней). При удалении пользователя из БД
+а также записи `login_events` старше 180 дней (`invalid`/`replayed`/`denied_unregistered` — старше 7 дней). При удалении пользователя из БД
 `login_events.user_id` и `telegram_id` его записей обнуляются (два FK `ON DELETE SET NULL`). В `sessions.ip` — IP клиента при входе (нормализованный, см. журнал входов).
 Блокировка: `users.is_blocked`/`blocked_at`; единая точка проверки — выдача токена (`/telegram`, `/refresh`, неявный refresh
 в `/me`, переиздание cookie после redeem/admin), заблокированному токен не выдаётся.

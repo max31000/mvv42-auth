@@ -1,10 +1,11 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using Mvv42.Auth.Access;
 using Mvv42.Auth.Data;
+using Mvv42.Auth.Invites;
 using Mvv42.Auth.Options;
-using Mvv42.Auth.Sessions;
 
 namespace Mvv42.Auth.Http.Endpoints;
 
@@ -30,7 +31,8 @@ public static partial class AdminEndpoints
     public sealed record SetAdminRequest(bool IsAdmin);
     public sealed record SetBlockedRequest(bool Blocked);
     public sealed record GrantRequest(long UserId, string? AppId);
-    public sealed record CreateInviteRequest(string? AppId, int MaxUses = 1, int ExpiresInHours = 168);
+    /// <summary><c>appId</c> must be present: an app id, or an explicit <c>null</c> for a login-only invite.</summary>
+    public sealed record CreateInviteRequest(JsonElement AppId, int MaxUses = 1, int ExpiresInHours = 168);
 
     public sealed record AdminUser(
         long Id, long TelegramId, string Name, string? Username, string? PhotoUrl,
@@ -48,10 +50,12 @@ public static partial class AdminEndpoints
 
     public sealed record OverviewApp(string Id, string Name, bool Anonymous, string Access, int GrantedUsers);
 
-    public sealed record Overview(int Users, int ActiveSessions, int Logins24h, int Logins7d, int Blocked, IReadOnlyList<OverviewApp> Apps);
+    /// <param name="DeniedUnregistered7d">Refused logins of unknown users (no/bad invite code) in the last 7 days.</param>
+    public sealed record Overview(
+        int Users, int ActiveSessions, int Logins24h, int Logins7d, int Blocked, int DeniedUnregistered7d, IReadOnlyList<OverviewApp> Apps);
 
     public sealed record AdminInvite(
-        long Id, string AppId, int MaxUses, int Uses, DateTime? ExpiresAt, long? CreatedBy, DateTime CreatedAt, string Status);
+        long Id, string? AppId, int MaxUses, int Uses, DateTime? ExpiresAt, long? CreatedBy, DateTime CreatedAt, string Status);
 
     private static IResult Error(string error, int status) => Results.Json(new { error }, statusCode: status);
 
@@ -195,7 +199,7 @@ public static partial class AdminEndpoints
         admin.MapDelete("/grants/{userId:long}/{appId}", async (long userId, string appId, IAuthStore store) =>
             await store.RemoveGrantAsync(userId, appId) ? Results.NoContent() : Results.NotFound());
 
-        // ---- invites (the code is returned once; only its hash is stored)
+        // ---- invites (the code is returned once; only its peppered hash is stored)
         admin.MapGet("/invites", async (IAuthStore store, TimeProvider time) =>
         {
             var now = Now(time);
@@ -204,21 +208,35 @@ public static partial class AdminEndpoints
                 .ToList();
         });
 
-        admin.MapPost("/invites", async (CreateInviteRequest body, HttpContext ctx, IAuthStore store, TimeProvider time) =>
+        admin.MapPost("/invites", async (CreateInviteRequest body, HttpContext ctx, IAuthStore store, TimeProvider time,
+            InviteCodeHasher hasher) =>
         {
-            if (!(await store.GetAppsAsync()).Any(a => a.Id == body.AppId))
-                return Bad("unknown_app");
+            // Missing (Undefined) or not a string/null → invalid_app_id; "" or an id that is not an app → unknown_app.
+            string? appId;
+            switch (body.AppId.ValueKind)
+            {
+                case JsonValueKind.Null:
+                    appId = null;
+                    break;
+                case JsonValueKind.String:
+                    appId = body.AppId.GetString();
+                    if (!(await store.GetAppsAsync()).Any(a => a.Id == appId))
+                        return Bad("unknown_app");
+                    break;
+                default:
+                    return Bad("invalid_app_id");
+            }
             if (body.MaxUses is < 1 or > 1000)
                 return Bad("invalid_max_uses");
             if (body.ExpiresInHours is < 1 or > 24 * 365)
                 return Bad("invalid_expiry");
 
             var now = Now(time);
-            var code = SecretTokens.New(16);
+            var code = InviteCodes.Generate();
             var invite = new Invite
             {
-                CodeHash = SecretTokens.Sha256Hex(code),
-                AppId = body.AppId!,
+                CodeHash = hasher.Hash(InviteCodes.Parse(code)!.Value),
+                AppId = appId,
                 MaxUses = body.MaxUses,
                 ExpiresAt = now.AddHours(body.ExpiresInHours),
                 CreatedBy = ctx.User.CurrentUserId(),
@@ -253,6 +271,7 @@ public static partial class AdminEndpoints
             Logins24h: await store.CountLoginEventsAsync(now.AddHours(-24), LoginResult.Ok),
             Logins7d: await store.CountLoginEventsAsync(now.AddDays(-7), LoginResult.Ok),
             Blocked: users.Count(u => u.IsBlocked),
+            DeniedUnregistered7d: await store.CountLoginEventsAsync(now.AddDays(-7), LoginResult.DeniedUnregistered),
             Apps: apps.Select(a => new OverviewApp(a.Id, a.Name, a.Anonymous, a.Access, granted.GetValueOrDefault(a.Id))).ToList());
     }
 

@@ -61,12 +61,24 @@ public interface IAuthStore
     Task<long> CreateInviteAsync(Invite invite);
     Task<IReadOnlyList<Invite>> ListInvitesAsync();
     Task<Invite?> GetInviteByCodeHashAsync(string codeHash);
+    /// <summary>One lookup (<c>code_hash IN (…)</c>); of several matches the earliest in <paramref name="codeHashes"/> wins.</summary>
+    Task<Invite?> FindInviteAsync(IReadOnlyList<string> codeHashes);
     Task<bool> DeleteInviteAsync(long id);
     /// <summary>
     /// Atomically: valid (not expired, uses &lt; max_uses) → uses+1 and grant (<see cref="InviteRedeemStatus.Granted"/>).
-    /// A user who already has the grant gets <see cref="InviteRedeemStatus.AlreadyGranted"/> without consuming a use.
+    /// A user who already has the grant, or a login-only invite (no app), gets <see cref="InviteRedeemStatus.AlreadyGranted"/>
+    /// without consuming a use.
     /// </summary>
     Task<InviteRedeemResult> RedeemInviteAsync(string codeHash, long userId, DateTime now);
+
+    /// <summary>
+    /// Closed registration, one transaction: invites matching <paramref name="codeHashes"/> row-locked in one
+    /// <c>SELECT … WHERE code_hash IN (…) FOR UPDATE</c>, the earliest candidate wins →
+    /// expiry/uses check → plain INSERT of the user (created_at = last_login_at = <paramref name="now"/>) → uses+1 → grant of
+    /// the invite's app (if any). A duplicate telegram id rolls everything back (<see cref="InviteRegistrationStatus.AlreadyRegistered"/>,
+    /// the use is not consumed); refusals store nothing.
+    /// </summary>
+    Task<InviteRegistrationResult> RegisterWithInviteAsync(TelegramProfile profile, IReadOnlyList<string> codeHashes, DateTime now);
 
     // Login events
     Task<long> AddLoginEventAsync(LoginEvent loginEvent);
