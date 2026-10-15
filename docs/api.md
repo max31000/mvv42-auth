@@ -283,6 +283,7 @@ type AdminInvite = { id: number;
 
 | Метод + путь | Тело → ответ |
 |---|---|
+| `GET /check` | `204` без тела — проверка «это владелец» для `auth_request` nginx (прокси мониторинга `/monitoring/api/*`); ничего не читает, кроме токена, и не пишет |
 | `GET /overview` | `{ users, activeSessions, logins24h, logins7d, blocked, deniedUnregistered7d, failedInviteChecks7d, apps: (AdminApp & { grantedUsers })[] }`. `logins*` — входы с `result=ok` за 24 ч / 7 дней; `deniedUnregistered7d` — попыток входа без приглашения (`result=denied_unregistered`) за 7 дней; `failedInviteChecks7d` — неудачных проверок кода (`result=invite_check_failed`, `POST /invites/check`) за 7 дней; `grantedUsers` — сколько незаблокированных пользователей имеют доступ к приложению (как `granted` в `/me`: `public` — все, `invite` — по гранту + админы, `admin` — админы) |
 | `GET /users` | `AdminUser[]` (по `id`) |
 | `GET /users/{id}` | `{ user: AdminUser, sessions: AdminSession[], logins: LoginEvent[] }` — активные сессии (новые первыми), последние 50 входов (по времени, новые первыми) · 404 `user_not_found` |
