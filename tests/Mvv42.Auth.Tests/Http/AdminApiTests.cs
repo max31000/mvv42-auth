@@ -87,6 +87,16 @@ public class AdminApiTests(AuthAppFactory factory) : IClassFixture<AuthAppFactor
     }
 
     [Fact]
+    public async Task Check_204ForOwner_401Anonymous_403ForUser()
+    {
+        var owner = await OwnerAsync();
+        Assert.Equal(HttpStatusCode.NoContent, (await owner.GetAsync("/auth/api/admin/check")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await factory.CreateBrowser().GetAsync("/auth/api/admin/check")).StatusCode);
+        var (user, _, _) = await UserAsync();
+        Assert.Equal(HttpStatusCode.Forbidden, (await user.GetAsync("/auth/api/admin/check")).StatusCode);
+    }
+
+    [Fact]
     public async Task Me_IsOwner_OnlyForAdminTelegramIds()
     {
         var owner = await OwnerAsync();

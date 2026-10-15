@@ -73,6 +73,10 @@ public static partial class AdminEndpoints
             .RequireAuthorization(AuthEndpoints.OwnerPolicy)
             .AddEndpointFilter(CallerFilter);
 
+        // ---- owner check for nginx auth_request (monitoring proxy, mvv42-infra spec 2026-10-16):
+        // 204 for the owner, 401/403 otherwise (policy + CallerFilter). Reads nothing else, writes nothing.
+        admin.MapGet("/check", () => Results.NoContent());
+
         // ---- overview
         admin.MapGet("/overview", Overview_);
 
