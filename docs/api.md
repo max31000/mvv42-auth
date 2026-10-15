@@ -243,6 +243,9 @@ invalid_invite_format`, redeem → `400 invite_not_found`).
 ### `GET /auth/health`
 `{"status":"ok"}` (без БД).
 
+
+### Метрики Prometheus
+Отдельный порт `9091` в контейнере (`Metrics:Port`, `0` — выключить), на хосте `127.0.0.1:9510`; публичный порт `/metrics` не отдаёт. HTTP-метрики prometheus-net с меткой `endpoint` = шаблон маршрута; `mvv42_auth_logins_total{result}` — попытки входа по `login_events.result`. Ни id пользователей, ни IP в метках нет.
 ## Admin API (`/auth/api/admin`, политика `owner`)
 
 **Доступ:** access-cookie, в котором claim `tg` входит в `Auth__AdminTelegramIds` (владелец). Иначе `401` (нет/истёк
