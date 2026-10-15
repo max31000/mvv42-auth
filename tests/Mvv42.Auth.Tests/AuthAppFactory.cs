@@ -27,6 +27,7 @@ public class AuthAppFactory : WebApplicationFactory<Program>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("Auth:KeysPath", _keys.Path);
+        builder.UseSetting("Metrics:Port", "0"); // no metric server port per test host
         builder.UseSetting("Auth:AllowedOrigins", Origin);
         builder.UseSetting("Auth:AdminTelegramIds", AdminTelegramId.ToString());
         builder.UseSetting("Auth:SecureCookies", "false");

@@ -14,6 +14,7 @@ using Mvv42.Auth.Options;
 using Mvv42.Auth.Sessions;
 using Mvv42.Auth.Telegram;
 using Mvv42.Auth.Tokens;
+using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -126,6 +127,15 @@ builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationH
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy(AuthEndpoints.OwnerPolicy, p => p.RequireAuthenticatedUser().AddRequirements(new OwnerRequirement()));
 
+// Prometheus metrics on their own port (Metrics:Port, default 9091; 0 = off), published on the host as
+// 127.0.0.1 only: the public port never serves /metrics (mvv42-infra docs/specs/2026-10-16-app-metrics.md).
+AuthMetrics.ConfigureDefaults();
+var metricsPort = builder.Configuration.GetValue("Metrics:Port", 9091);
+if (metricsPort is < 0 or > ushort.MaxValue)
+    throw new InvalidOperationException("Metrics:Port must be 0..65535.");
+if (metricsPort > 0)
+    builder.Services.AddMetricServer(o => o.Port = (ushort)metricsPort);
+
 var app = builder.Build();
 
 // Malformed security settings stop the service in every environment (instead of failing per request).
@@ -168,6 +178,8 @@ app.UseForwardedHeaders();
 // nginx does not strip the prefix: /auth/api/... arrives as is (spec §9.8).
 app.UsePathBase("/auth");
 app.UseRouting(); // explicitly after UsePathBase so routes match the path without the prefix
+// Labels: method, code class, endpoint = route template (never the raw path).
+app.UseHttpMetrics(o => o.ReduceStatusCodeCardinality());
 app.UseRateLimiter();
 
 app.UseAuthentication();
