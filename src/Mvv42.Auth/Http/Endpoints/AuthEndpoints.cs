@@ -184,6 +184,7 @@ public static class AuthEndpoints
     internal static async Task LogLoginAsync(
         HttpContext ctx, IAuthStore store, TimeProvider time, string result, long? userId, long? telegramId, bool withClient = true)
     {
+        AuthMetrics.Logins.WithLabels(result).Inc();
         try
         {
             await store.AddLoginEventAsync(new LoginEvent

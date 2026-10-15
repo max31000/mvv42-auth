@@ -132,6 +132,7 @@ jobs:
                 --label com.centurylinklabs.watchtower.enable=false \
                 --network "$NETWORK" \
                 -p 127.0.0.1:5010:8080 \
+                -p 127.0.0.1:9510:9091 \
                 -v /var/lib/mvv42-auth/keys:/var/lib/mvv42-auth/keys \
                 --env-file "$ENV_FILE" \
                 "$1"
