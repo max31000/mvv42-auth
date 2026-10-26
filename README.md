@@ -93,8 +93,12 @@ ssh на VDS: секреты пишутся в `/etc/mvv42/env/mvv42-auth.env` (
 `docker rm -f mvv42-auth && docker run … ghcr.io/max31000/mvv42-auth:sha-<commit>` с аргументами из `deploy.yml`.
 Миграции только добавляют таблицы (`IF NOT EXISTS`), поэтому старый образ работает с новой схемой.
 
-Секреты репозитория: `VDS_HOST`, `VDS_USER`, `VDS_SSH_KEY`, `AUTH_DB_CONNECTION_STRING`, `AUTH_TELEGRAM_BOT_TOKEN`,
-`AUTH_ADMIN_TELEGRAM_IDS`, `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (уведомления).
+Секреты репозитория: `VDS_HOST`, `VDS_USER`, `VDS_SSH_KEY`, `AUTH_DB_CONNECTION_STRING`,
+`AUTH_ADMIN_TELEGRAM_IDS`, `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (уведомления, отдельный бот).
+
+Токен **бота входа** — не в GitHub: он HMAC-ключ Login Widget (кто его знает, тот подписывает вход за любой
+Telegram id). Лежит только на сервере: `/etc/mvv42/secrets/auth-login-bot-token` (600), деплой читает его оттуда.
+`AUTH_TELEGRAM_BOT_TOKEN` в GitHub — переходный фолбэк, пока файла нет; после ротации секрет удаляется.
 
 Однократно руками (не автоматизировано):
 
