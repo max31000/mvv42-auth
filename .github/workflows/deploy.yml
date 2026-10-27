@@ -70,6 +70,7 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
         env:
           AUTH_DB_CONNECTION_STRING: ${{ secrets.AUTH_DB_CONNECTION_STRING }}
+          # Transition only: used while /etc/mvv42/secrets/auth-login-bot-token does not exist on the server.
           AUTH_TELEGRAM_BOT_TOKEN: ${{ secrets.AUTH_TELEGRAM_BOT_TOKEN }}
           AUTH_ADMIN_TELEGRAM_IDS: ${{ secrets.AUTH_ADMIN_TELEGRAM_IDS }}
           IMAGE_REF: ${{ env.IMAGE }}:sha-${{ github.sha }}
@@ -95,10 +96,22 @@ jobs:
             GATEWAY="$(docker network inspect "$NETWORK" -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | awk '{print $1}')"
             [ -n "$GATEWAY" ] || { echo "cannot determine the gateway of $NETWORK" >&2; exit 1; }
 
+            # The login-bot token is the HMAC key of the Telegram Login Widget: whoever holds it can sign a login
+            # payload for any Telegram id. It lives only on the server (written by hand, mode 600) - not in GitHub,
+            # not in other apps (mvv42-infra docs/secrets.md, "Telegram bots").
+            BOT_TOKEN_FILE=/etc/mvv42/secrets/auth-login-bot-token
+            if [ -s "$BOT_TOKEN_FILE" ]; then
+              LOGIN_BOT_TOKEN="$(tr -d '[:space:]' < "$BOT_TOKEN_FILE")"
+            else
+              echo "WARNING: $BOT_TOKEN_FILE is missing - using the AUTH_TELEGRAM_BOT_TOKEN GitHub secret (transition)"
+              LOGIN_BOT_TOKEN="${AUTH_TELEGRAM_BOT_TOKEN:-}"
+            fi
+            [ -n "$LOGIN_BOT_TOKEN" ] || { echo "login bot token is empty - refusing to deploy" >&2; exit 1; }
+
             umask 077
             {
               printf 'ConnectionStrings__Auth=%s\n' "$AUTH_DB_CONNECTION_STRING"
-              printf 'Telegram__BotToken=%s\n' "$AUTH_TELEGRAM_BOT_TOKEN"
+              printf 'Telegram__BotToken=%s\n' "$LOGIN_BOT_TOKEN"
               printf 'Telegram__BotUsername=%s\n' 'mv_cashpulse_bot'
               printf 'Auth__AdminTelegramIds=%s\n' "$AUTH_ADMIN_TELEGRAM_IDS"
               printf 'Auth__AllowedOrigins=%s\n' 'https://mvv42.ru'
